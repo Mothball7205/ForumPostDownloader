@@ -484,354 +484,391 @@ let xfpdBunkrCfWarmupLastAt = 0;
 
 // Ensure we open at most ONE warm-up tab at a time (and no more than once per cooldown window).
 async function xfpdBunkrCfWarmup(url) {
-    try {
-        const now = Date.now();
+  try {
+    const now = Date.now();
 
-        // If a warm-up is already running, just wait for it.
-        if (xfpdBunkrCfWarmupPromise) {
-            return await xfpdBunkrCfWarmupPromise;
-        }
-
-        // If we recently warmed up, don't open another tab; just wait a bit to avoid hammering.
-        if (now - xfpdBunkrCfWarmupLastAt < BUNKR_CF_WARMUP_COOLDOWN_MS) {
-            try { await h.delayedResolve(Math.min(1000, BUNKR_CF_WARMUP_MS)); } catch (e) {}
-            return null;
-        }
-
-        xfpdBunkrCfWarmupLastAt = now;
-
-        xfpdBunkrCfWarmupPromise = (async () => {
-            await xfpdWarmupTab(url);
-        })();
-
-        try {
-            return await xfpdBunkrCfWarmupPromise;
-        } finally {
-            xfpdBunkrCfWarmupPromise = null;
-        }
-    } catch (e) {
-        // Best-effort
-        return null;
+    // If a warm-up is already running, just wait for it.
+    if (xfpdBunkrCfWarmupPromise) {
+      return await xfpdBunkrCfWarmupPromise;
     }
+
+    // If we recently warmed up, don't open another tab; just wait a bit to avoid hammering.
+    if (now - xfpdBunkrCfWarmupLastAt < BUNKR_CF_WARMUP_COOLDOWN_MS) {
+      try {
+        await h.delayedResolve(Math.min(1000, BUNKR_CF_WARMUP_MS));
+      } catch (e) {}
+      return null;
+    }
+
+    xfpdBunkrCfWarmupLastAt = now;
+
+    xfpdBunkrCfWarmupPromise = (async () => {
+      await xfpdWarmupTab(url);
+    })();
+
+    try {
+      return await xfpdBunkrCfWarmupPromise;
+    } finally {
+      xfpdBunkrCfWarmupPromise = null;
+    }
+  } catch (e) {
+    // Best-effort
+    return null;
+  }
 }
 
 async function xfpdBunkrGetWithCfRetry(http, url, warmUrlOrOrigin, allowWarmup = true) {
-    let last = null;
-    for (let attempt = 0; attempt <= BUNKR_CF_MAX_RETRIES; attempt++) {
-        try {
-            last = await http.get(url);
-        } catch (e) {
-            last = null;
-        }
-
-        const dom = last?.dom;
-        const source = last?.source || '';
-
-
-// Fast-fail on 403 / CF interstitial for non-last domains:
-// Immediately blacklist this domain and return, so the caller can try the next domain.
-const status = Number(last?.status || 0);
-if (BUNKR_FASTFAIL_ON_403 && (status === 403) && !allowWarmup) {
-    xfpdBunkrBanBase(warmUrlOrOrigin || url);
-    return last || { dom: null, source: '' };
-}
-if (BUNKR_FASTFAIL_ON_403 && !allowWarmup && last && xfpdLooksLikeCfChallenge(source, dom)) {
-    xfpdBunkrBanBase(warmUrlOrOrigin || url);
-    return last || { dom: null, source: '' };
-}
-
-        if (last && !xfpdLooksLikeCfChallenge(source, dom)) return last;
-
-        if (attempt < BUNKR_CF_MAX_RETRIES) {
-            if (allowWarmup) {
-                await xfpdBunkrCfWarmup(String(warmUrlOrOrigin || url));
-            } else {
-                try { await h.delayedResolve(200); } catch (e) {}
-            }
-}
+  let last = null;
+  for (let attempt = 0; attempt <= BUNKR_CF_MAX_RETRIES; attempt++) {
+    try {
+      last = await http.get(url);
+    } catch (e) {
+      last = null;
     }
-    return last || { dom: null, source: '' };
+
+    const dom = last?.dom;
+    const source = last?.source || '';
+
+    // Fast-fail on 403 / CF interstitial for non-last domains:
+    // Immediately blacklist this domain and return, so the caller can try the next domain.
+    const status = Number(last?.status || 0);
+    if (BUNKR_FASTFAIL_ON_403 && status === 403 && !allowWarmup) {
+      xfpdBunkrBanBase(warmUrlOrOrigin || url);
+      return last || { dom: null, source: '' };
+    }
+    if (BUNKR_FASTFAIL_ON_403 && !allowWarmup && last && xfpdLooksLikeCfChallenge(source, dom)) {
+      xfpdBunkrBanBase(warmUrlOrOrigin || url);
+      return last || { dom: null, source: '' };
+    }
+
+    if (last && !xfpdLooksLikeCfChallenge(source, dom)) return last;
+
+    if (attempt < BUNKR_CF_MAX_RETRIES) {
+      if (allowWarmup) {
+        await xfpdBunkrCfWarmup(String(warmUrlOrOrigin || url));
+      } else {
+        try {
+          await h.delayedResolve(200);
+        } catch (e) {}
+      }
+    }
+  }
+  return last || { dom: null, source: '' };
 }
 
 async function xfpdBunkrPostVsWithCfRetry(http, endpoint, slug, refererUrl, originUrl, allowWarmup = true) {
-    let lastText = '';
-    let lastStatus = 0;
-    for (let attempt = 0; attempt <= BUNKR_CF_MAX_RETRIES; attempt++) {
-        try {
-            const response = await http.post(
-                endpoint,
-                JSON.stringify({ slug }),
-                {},
-                {
-                    'Content-Type': 'application/json',
-                    Referer: refererUrl,
-                    Origin: originUrl,
-                },
-            );
-            lastText = String(response?.source || '');
-            lastStatus = Number(response?.status || 0);
-        } catch (e) {
-            lastText = '';
-            lastStatus = 0;
-        }
-
-
-
-// Fast-fail on 403 / CF interstitial for non-last domains:
-// Immediately blacklist this domain and return null so the caller tries the next domain.
-if (BUNKR_FASTFAIL_ON_403 && (Number(lastStatus || 0) === 403) && !allowWarmup) {
-    xfpdBunkrBanBase(originUrl || refererUrl || endpoint);
-    return null;
-}
-if (BUNKR_FASTFAIL_ON_403 && !allowWarmup && xfpdLooksLikeCfChallenge(lastText, null)) {
-    xfpdBunkrBanBase(originUrl || refererUrl || endpoint);
-    return null;
-}
-try {
-            return JSON.parse(lastText || '{}');
-        } catch (e) {
-            if (xfpdLooksLikeCfChallenge(lastText, null) && attempt < BUNKR_CF_MAX_RETRIES) {
-                if (allowWarmup) {
-                    await xfpdBunkrCfWarmup(String(refererUrl || originUrl || endpoint));
-                } else {
-                    try { await h.delayedResolve(200); } catch (e2) {}
-                }
-continue;
-            }
-            return null;
-        }
+  let lastText = '';
+  let lastStatus = 0;
+  for (let attempt = 0; attempt <= BUNKR_CF_MAX_RETRIES; attempt++) {
+    try {
+      const response = await http.post(
+        endpoint,
+        JSON.stringify({ slug }),
+        {},
+        {
+          'Content-Type': 'application/json',
+          Referer: refererUrl,
+          Origin: originUrl,
+        },
+      );
+      lastText = String(response?.source || '');
+      lastStatus = Number(response?.status || 0);
+    } catch (e) {
+      lastText = '';
+      lastStatus = 0;
     }
-    return null;
+
+    // Fast-fail on 403 / CF interstitial for non-last domains:
+    // Immediately blacklist this domain and return null so the caller tries the next domain.
+    if (BUNKR_FASTFAIL_ON_403 && Number(lastStatus || 0) === 403 && !allowWarmup) {
+      xfpdBunkrBanBase(originUrl || refererUrl || endpoint);
+      return null;
+    }
+    if (BUNKR_FASTFAIL_ON_403 && !allowWarmup && xfpdLooksLikeCfChallenge(lastText, null)) {
+      xfpdBunkrBanBase(originUrl || refererUrl || endpoint);
+      return null;
+    }
+    try {
+      return JSON.parse(lastText || '{}');
+    } catch (e) {
+      if (xfpdLooksLikeCfChallenge(lastText, null) && attempt < BUNKR_CF_MAX_RETRIES) {
+        if (allowWarmup) {
+          await xfpdBunkrCfWarmup(String(refererUrl || originUrl || endpoint));
+        } else {
+          try {
+            await h.delayedResolve(200);
+          } catch (e2) {}
+        }
+        continue;
+      }
+      return null;
+    }
+  }
+  return null;
 }
-
-
-
-
-
-
 
 // Turbo mapping: signed turbocdn URL -> Turbo id (needed for re-sign when resolving from /a/ albums)
 const turboIdBySignedUrl = new Map();
 
 const h = {
-    /**
+  /**
    * @param v
    * @returns {arg is any[]}
    */
-    isArray: v => Array.isArray(v),
-    /**
+  isArray: v => Array.isArray(v),
+  /**
    * @param v
    * @returns {boolean}
    */
-    isObject: v => typeof v === 'object',
-    /**
+  isObject: v => typeof v === 'object',
+  /**
    * @param v
    * @returns {boolean}
    */
-    isNullOrUndef: v => v === null || v === undefined || typeof v === 'undefined',
-    /**
+  isNullOrUndef: v => v === null || v === undefined || typeof v === 'undefined',
+  /**
    * @param path
    * @returns {unknown}
    */
-    basename: path =>
+  basename: path =>
     path
-    .replace(/\/(\s+)?$/, '')
-    .split('/')
-    .reverse()[0],
-    /**
+      .replace(/\/(\s+)?$/, '')
+      .split('/')
+      .reverse()[0],
+  /**
    * @param path
    * @returns {string}
    */
-    fnNoExt: path => path.trim().split('.').reverse().slice(1).reverse().join('.'),
-    /**
+  fnNoExt: path => path.trim().split('.').reverse().slice(1).reverse().join('.'),
+  /**
    * @param path
    * @returns {unknown}
    */
-    ext: path => {
-        return !path || path.indexOf('.') < 0 ? null : path.split('.').reverse()[0];
-    },
-    /**
+  ext: path => {
+    return !path || path.indexOf('.') < 0 ? null : path.split('.').reverse()[0];
+  },
+  /**
    * @param element
    * @returns {string}
    */
-    show: element => (element.style.display = 'block'),
-    /**
+  show: element => (element.style.display = 'block'),
+  /**
    * @param element
    * @returns {string}
    */
-    hide: element => (element.style.display = 'none'),
-    /**
+  hide: element => (element.style.display = 'none'),
+  /**
    * @param executor
    * @returns {Promise<unknown>}
    */
-    promise: executor => new Promise(executor),
-    /**
+  promise: executor => new Promise(executor),
+  /**
    * @param ms
    * @returns {Promise<unknown>}
    */
-    delayedResolve: async ms => await h.promise(resolve => setTimeout(resolve, ms)),
-    /**
+  delayedResolve: async ms => await h.promise(resolve => setTimeout(resolve, ms)),
+  /**
    * @param tag
    * @param content
    * @returns {*}
    */
-    stripTag: (tag, content) => content.replace(new RegExp(`<${tag}.*?<\/${tag}>`, 'igs'), ''),
-    /**
+  stripTag: (tag, content) => content.replace(new RegExp(`<${tag}.*?<\/${tag}>`, 'igs'), ''),
+  /**
    * @param tags
    * @param content
    * @returns {*}
    */
-    stripTags: (tags, content) => tags.reduce((stripped, tag) => h.stripTag(tag, stripped), content),
-    /**
+  stripTags: (tags, content) => tags.reduce((stripped, tag) => h.stripTag(tag, stripped), content),
+  /**
    * @param string
    * @param maxLength
    * @returns {string|*}
    */
-    limit: (string, maxLength = 20) => (string.length > maxLength ? `${string.substring(0, maxLength - 1)}...` : string),
-    /**
+  limit: (string, maxLength = 20) => (string.length > maxLength ? `${string.substring(0, maxLength - 1)}...` : string),
+  /**
    * @param selector
    * @param container
    * @returns {*}
    */
-    element: (selector, container = document) => container.querySelector(selector),
-    /**
+  element: (selector, container = document) => container.querySelector(selector),
+  /**
    * @param selector
    * @param container
    * @returns {NodeListOf<*>}
    */
-    elements: (selector, container = document) => container.querySelectorAll(selector),
-    /**
+  elements: (selector, container = document) => container.querySelectorAll(selector),
+  /**
+   * @param selector
+   * @param container
+   * @param timeout
+   * @param interval
+   * @returns {Promise<*>}
+   */
+  waitForElement: (selector, container = document, timeout = 15000, interval = 100) => {
+    return h.promise(resolve => {
+      const startedAt = Date.now();
+
+      const lookup = () => {
+        let root = container;
+
+        if (typeof container === 'function') {
+          try {
+            root = container();
+          } catch (e) {
+            root = document;
+          }
+        }
+
+        const element = root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null;
+
+        if (element) {
+          resolve(element);
+          return;
+        }
+
+        if (Date.now() - startedAt >= timeout) {
+          resolve(null);
+          return;
+        }
+
+        setTimeout(lookup, interval);
+      };
+
+      lookup();
+    });
+  },
+  /**
    * @param needle
    * @param haystack
    * @param ignoreCase
    * @returns {boolean}
    */
-    contains: (needle, haystack, ignoreCase = true) =>
+  contains: (needle, haystack, ignoreCase = true) =>
     (ignoreCase ? haystack.toLowerCase().indexOf(needle.toLowerCase()) : haystack.indexOf(needle)) > -1,
-    /**
+  /**
    * @param str
    * @returns {*|string}
    */
-    ucFirst: str => (!str ? str : `${str[0].toUpperCase()}${str.substring(1)}`),
-    /**
+  ucFirst: str => (!str ? str : `${str[0].toUpperCase()}${str.substring(1)}`),
+  /**
    * @param items
    * @param cb
    * @returns {*}
    */
-    unique: (items, cb) => {
-        if (cb) {
-            return items.reduce((acc, item) => (!acc.find(i => i[byKey] === item[byKey]) ? acc.concat(item) : acc), []);
-        }
+  unique: (items, cb) => {
+    if (cb) {
+      return items.reduce((acc, item) => (!acc.find(i => i[byKey] === item[byKey]) ? acc.concat(item) : acc), []);
+    }
 
-        return items.reduce((acc, item) => (acc.indexOf(item) < 0 ? acc.concat(item) : acc), []);
-    },
-    /**
+    return items.reduce((acc, item) => (acc.indexOf(item) < 0 ? acc.concat(item) : acc), []);
+  },
+  /**
    * https://github.com/sindresorhus/pretty-bytes
    *
    * @param number
    * @param options
    * @returns {string}
    */
-    prettyBytes: (number, options = {}) => {
-        const BYTE_UNITS = ['B', 'kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+  prettyBytes: (number, options = {}) => {
+    const BYTE_UNITS = ['B', 'kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
 
-        const BIBYTE_UNITS = ['B', 'kiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB'];
+    const BIBYTE_UNITS = ['B', 'kiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB'];
 
-        const BIT_UNITS = ['b', 'kbit', 'Mbit', 'Gbit', 'Tbit', 'Pbit', 'Ebit', 'Zbit', 'Ybit'];
+    const BIT_UNITS = ['b', 'kbit', 'Mbit', 'Gbit', 'Tbit', 'Pbit', 'Ebit', 'Zbit', 'Ybit'];
 
-        const BIBIT_UNITS = ['b', 'kibit', 'Mibit', 'Gibit', 'Tibit', 'Pibit', 'Eibit', 'Zibit', 'Yibit'];
+    const BIBIT_UNITS = ['b', 'kibit', 'Mibit', 'Gibit', 'Tibit', 'Pibit', 'Eibit', 'Zibit', 'Yibit'];
 
-        /*
+    /*
     Formats the given number using `Number#toLocaleString`.
     - If locale is a string, the value is expected to be a locale-key (for example: `de`).
     - If locale is true, the system default locale is used for translation.
     - If no value for locale is specified, the number is returned unmodified.
     */
-        const toLocaleString = (number, locale, options) => {
-            let result = number;
-            if (typeof locale === 'string' || Array.isArray(locale)) {
-                result = number.toLocaleString(locale, options);
-            } else if (locale === true || options !== undefined) {
-                result = number.toLocaleString(undefined, options);
-            }
+    const toLocaleString = (number, locale, options) => {
+      let result = number;
+      if (typeof locale === 'string' || Array.isArray(locale)) {
+        result = number.toLocaleString(locale, options);
+      } else if (locale === true || options !== undefined) {
+        result = number.toLocaleString(undefined, options);
+      }
 
-            return result;
-        };
+      return result;
+    };
 
-        if (!Number.isFinite(number)) {
-            throw new TypeError(`Expected a finite number, got ${typeof number}: ${number}`);
-        }
+    if (!Number.isFinite(number)) {
+      throw new TypeError(`Expected a finite number, got ${typeof number}: ${number}`);
+    }
 
-        options = {
-            bits: false,
-            binary: false,
-            space: true,
-            ...options,
-        };
+    options = {
+      bits: false,
+      binary: false,
+      space: true,
+      ...options,
+    };
 
-        const UNITS = options.bits ? (options.binary ? BIBIT_UNITS : BIT_UNITS) : options.binary ? BIBYTE_UNITS : BYTE_UNITS;
+    const UNITS = options.bits ? (options.binary ? BIBIT_UNITS : BIT_UNITS) : options.binary ? BIBYTE_UNITS : BYTE_UNITS;
 
-        const separator = options.space ? ' ' : '';
+    const separator = options.space ? ' ' : '';
 
-        if (options.signed && number === 0) {
-            return ` 0${separator}${UNITS[0]}`;
-        }
+    if (options.signed && number === 0) {
+      return ` 0${separator}${UNITS[0]}`;
+    }
 
-        const isNegative = number < 0;
-        const prefix = isNegative ? '-' : options.signed ? '+' : '';
+    const isNegative = number < 0;
+    const prefix = isNegative ? '-' : options.signed ? '+' : '';
 
-        if (isNegative) {
-            number = -number;
-        }
+    if (isNegative) {
+      number = -number;
+    }
 
-        let localeOptions;
+    let localeOptions;
 
-        if (options.minimumFractionDigits !== undefined) {
-            localeOptions = { minimumFractionDigits: options.minimumFractionDigits };
-        }
+    if (options.minimumFractionDigits !== undefined) {
+      localeOptions = { minimumFractionDigits: options.minimumFractionDigits };
+    }
 
-        if (options.maximumFractionDigits !== undefined) {
-            localeOptions = { maximumFractionDigits: options.maximumFractionDigits, ...localeOptions };
-        }
+    if (options.maximumFractionDigits !== undefined) {
+      localeOptions = { maximumFractionDigits: options.maximumFractionDigits, ...localeOptions };
+    }
 
-        if (number < 1) {
-            const numberString = toLocaleString(number, options.locale, localeOptions);
-            return prefix + numberString + separator + UNITS[0];
-        }
+    if (number < 1) {
+      const numberString = toLocaleString(number, options.locale, localeOptions);
+      return prefix + numberString + separator + UNITS[0];
+    }
 
-        const exponent = Math.min(Math.floor(options.binary ? Math.log(number) / Math.log(1024) : Math.log10(number) / 3), UNITS.length - 1);
-        number /= (options.binary ? 1024 : 1000) ** exponent;
+    const exponent = Math.min(Math.floor(options.binary ? Math.log(number) / Math.log(1024) : Math.log10(number) / 3), UNITS.length - 1);
+    number /= (options.binary ? 1024 : 1000) ** exponent;
 
-        if (!localeOptions) {
-            number = number.toPrecision(3);
-        }
+    if (!localeOptions) {
+      number = number.toPrecision(3);
+    }
 
-        const numberString = toLocaleString(Number(number), options.locale, localeOptions);
+    const numberString = toLocaleString(Number(number), options.locale, localeOptions);
 
-        const unit = UNITS[exponent];
+    const unit = UNITS[exponent];
 
-        return prefix + numberString + separator + unit;
-    },
-    ui: {
-        /**
+    return prefix + numberString + separator + unit;
+  },
+  ui: {
+    /**
      * @param element
      * @param text
      */
-        setText: (element, text) => {
-            element.textContent = text;
-        },
-        /**
+    setText: (element, text) => {
+      element.textContent = text;
+    },
+    /**
      * @param element
      * @param props
      */
-        setElProps: (element, props) => {
-            for (const prop in props) {
-                element.style[prop] = props[prop];
-            }
-        },
+    setElProps: (element, props) => {
+      for (const prop in props) {
+        element.style[prop] = props[prop];
+      }
     },
-    http: {
-        /**
+  },
+  http: {
+    /**
      * @param method
      * @param url
      * @param callbacks
@@ -840,660 +877,685 @@ const h = {
      * @param responseType
      * @returns {Promise<unknown>}
      */
-        base: (method, url, callbacks = {}, headers = {}, data = {}, responseType = 'document') => {
-            return h.promise((resolve, reject) => {
-                let responseHeaders = null;
-                let request = null;
-                // Allow passing non-header request options via a special key in the headers object.
-                // This keeps the original function signature intact.
-                const hdrs = {
-                    Referer: url,
-                    ...(headers || {}),
-                };
-                const withCredentials = !!(hdrs && Object.prototype.hasOwnProperty.call(hdrs, '__xfpd_withCredentials') && hdrs.__xfpd_withCredentials);
-                try { if (hdrs && Object.prototype.hasOwnProperty.call(hdrs, '__xfpd_withCredentials')) delete hdrs.__xfpd_withCredentials; } catch (e) {}
+    base: (method, url, callbacks = {}, headers = {}, data = {}, responseType = 'document') => {
+      return h.promise((resolve, reject) => {
+        let responseHeaders = null;
+        let request = null;
+        // Allow passing non-header request options via a special key in the headers object.
+        // This keeps the original function signature intact.
+        const hdrs = {
+          Referer: url,
+          ...(headers || {}),
+        };
+        const withCredentials = !!(
+          hdrs &&
+          Object.prototype.hasOwnProperty.call(hdrs, '__xfpd_withCredentials') &&
+          hdrs.__xfpd_withCredentials
+        );
+        try {
+          if (hdrs && Object.prototype.hasOwnProperty.call(hdrs, '__xfpd_withCredentials')) delete hdrs.__xfpd_withCredentials;
+        } catch (e) {}
 
-                request = http({
-                    url,
-                    method,
-                    responseType,
-                    data,
-                    headers: hdrs,
-                    ...(withCredentials ? { withCredentials: true, anonymous: false } : {}),
-                    onreadystatechange: response => {
-                        if (response.readyState === 2) {
-                            responseHeaders = response.responseHeaders;
-                            const finalUrl = response.finalUrl || response.responseURL || '';
+        request = http({
+          url,
+          method,
+          responseType,
+          data,
+          headers: hdrs,
+          ...(withCredentials ? { withCredentials: true, anonymous: false } : {}),
+          onreadystatechange: response => {
+            if (response.readyState === 2) {
+              responseHeaders = response.responseHeaders;
+              const finalUrl = response.finalUrl || response.responseURL || '';
 
-                            if (callbacks && callbacks.onResponseHeadersReceieved) {
-                                callbacks.onResponseHeadersReceieved({ request, response, status: response.status, responseHeaders });
+              if (callbacks && callbacks.onResponseHeadersReceieved) {
+                callbacks.onResponseHeadersReceieved({ request, response, status: response.status, responseHeaders });
 
-                                if (request) {
-                                    request.abort();
-                                    resolve({ request, response, status: response.status, responseHeaders, finalUrl });
-                                }
-                            }
-                        }
+                if (request) {
+                  request.abort();
+                  resolve({ request, response, status: response.status, responseHeaders, finalUrl });
+                }
+              }
+            }
 
-                        callbacks && callbacks.onStateChange && callbacks.onStateChange({ request, response });
-                    },
-                    onprogress: response => {
-                        callbacks && callbacks.onProgress && callbacks.onProgress({ request, response });
-                    },
-                    onload: response => {
-                        const { responseText, status } = response;
-                        const dom = response?.response;
-                        const finalUrl = response.finalUrl || response.responseURL || '';
-                        callbacks && callbacks.onLoad && callbacks.onLoad(response);
-                        resolve({ source: responseText, request, status, dom, responseHeaders, finalUrl });
-                    },
-                    onerror: error => {
-                        callbacks && callbacks.onError && callbacks.onError(error);
-                        reject(error);
-                    },
-                });
-            });
-        },
-        /**
+            callbacks && callbacks.onStateChange && callbacks.onStateChange({ request, response });
+          },
+          onprogress: response => {
+            callbacks && callbacks.onProgress && callbacks.onProgress({ request, response });
+          },
+          onload: response => {
+            const { responseText, status } = response;
+            const dom = response?.response;
+            const finalUrl = response.finalUrl || response.responseURL || '';
+            callbacks && callbacks.onLoad && callbacks.onLoad(response);
+            resolve({ source: responseText, request, status, dom, responseHeaders, finalUrl });
+          },
+          onerror: error => {
+            callbacks && callbacks.onError && callbacks.onError(error);
+            reject(error);
+          },
+        });
+      });
+    },
+    /**
      * @param url
      * @param callbacks
      * @param headers
      * @param responseType
      * @returns {Promise<unknown>}
      */
-        get: (url, callbacks = {}, headers = {}, responseType = 'document') => {
-            return h.promise(resolve => resolve(h.http.base('GET', url, callbacks, headers, null, responseType)));
-        },
-        /**
+    get: (url, callbacks = {}, headers = {}, responseType = 'document') => {
+      return h.promise(resolve => resolve(h.http.base('GET', url, callbacks, headers, null, responseType)));
+    },
+    /**
      * @param url
      * @param data
      * @param callbacks
      * @param headers
      * @returns {Promise<unknown>}
      */
-        post: (url, data = {}, callbacks = {}, headers = {}) => {
-            return h.promise(resolve => resolve(h.http.base('POST', url, callbacks, headers, data)));
-        },
+    post: (url, data = {}, callbacks = {}, headers = {}) => {
+      return h.promise(resolve => resolve(h.http.base('POST', url, callbacks, headers, data)));
     },
-    re: {
-        /**
+  },
+  re: {
+    /**
      * @param pattern
      * @returns {string|*}
      */
-        stripFlags: pattern => {
-            if (!h.contains('/', pattern)) {
-                return pattern;
-            }
+    stripFlags: pattern => {
+      if (!h.contains('/', pattern)) {
+        return pattern;
+      }
 
-            const s = pattern.split('').reverse().join('');
+      const s = pattern.split('').reverse().join('');
 
-            const index = s.indexOf('/');
+      const index = s.indexOf('/');
 
-            return s.substring(index).split('').reverse().join('');
-        },
-        /**
+      return s.substring(index).split('').reverse().join('');
+    },
+    /**
      * @param pattern
      * @returns {string|*}
      */
-        toString: pattern => {
-            let stringified = h.re.stripFlags(pattern.toString());
+    toString: pattern => {
+      let stringified = h.re.stripFlags(pattern.toString());
 
-            if (stringified[0] === '/') {
-                stringified = stringified.substring(1);
-            }
+      if (stringified[0] === '/') {
+        stringified = stringified.substring(1);
+      }
 
-            if (stringified[stringified.length - 1] === '/') {
-                stringified = stringified.substring(0, stringified.length - 1);
-            }
+      if (stringified[stringified.length - 1] === '/') {
+        stringified = stringified.substring(0, stringified.length - 1);
+      }
 
-            return stringified;
-        },
-        /**
+      return stringified;
+    },
+    /**
      * @param pattern
      * @param flags
      * @returns {RegExp}
      */
-        toRegExp: (pattern, flags) => {
-            return new RegExp(pattern, flags);
-        },
-        /**
+    toRegExp: (pattern, flags) => {
+      return new RegExp(pattern, flags);
+    },
+    /**
      * @param pattern
      * @param subject
      * @returns {*|null}
      */
-        match: (pattern, subject) => {
-            const matches = pattern.exec(subject);
-            return matches && matches.length ? matches[0] : null;
-        },
-        /**
+    match: (pattern, subject) => {
+      const matches = pattern.exec(subject);
+      return matches && matches.length ? matches[0] : null;
+    },
+    /**
      * @source regex101.com
      * @param pattern
      * @param subject
      * @returns {*[]}
      */
-        matchAll: (pattern, subject) => {
-            const matches = [];
+    matchAll: (pattern, subject) => {
+      const matches = [];
 
-            let m;
+      let m;
 
-            while ((m = pattern.exec(subject)) !== null) {
-                // This is necessary to avoid infinite loops with zero-width matches
-                if (m.index === pattern.lastIndex) {
-                    pattern.lastIndex++;
-                }
+      while ((m = pattern.exec(subject)) !== null) {
+        // This is necessary to avoid infinite loops with zero-width matches
+        if (m.index === pattern.lastIndex) {
+          pattern.lastIndex++;
+        }
 
-                matches.push(m[0]);
-            }
+        matches.push(m[0]);
+      }
 
-            return matches;
-        },
+      return matches;
     },
+  },
 };
 
 Array.prototype.unique = function (cb) {
-    return h.unique(this, cb);
+  return h.unique(this, cb);
 };
 
 const parsers = {
-    thread: {
-        /**
+  thread: {
+    /**
      * @returns {string}
      */
-        parseTitle: () => {
-            const emojisPattern =
-                  /[\u{1f300}-\u{1f5ff}\u{1f900}-\u{1f9ff}\u{1f600}-\u{1f64f}\u{1f680}-\u{1f6ff}\u{2600}-\u{26ff}\u{2700}-\u{27bf}\u{1f191}-\u{1f251}\u{1f004}\u{1f0cf}\u{1f170}-\u{1f171}\u{1f17e}-\u{1f17f}\u{1f18e}\u{3030}\u{2b50}\u{2b55}\u{2934}-\u{2935}\u{2b05}-\u{2b07}\u{2b1b}-\u{2b1c}\u{3297}\u{3299}\u{303d}\u{00a9}\u{00ae}\u{2122}\u{23f3}\u{24c2}\u{23e9}-\u{23ef}\u{25b6}\u{23f8}-\u{23fa}]/gu;
-            let parsed = h.stripTags(['a', 'span'], h.element('.p-title-value').innerHTML).replace('/\n/g', '');
-            return !settings.naming.allowEmojis ? parsed.replace(emojisPattern, settings.naming.invalidCharSubstitute).trim() : parsed.trim();
-        },
-        /**
+    parseTitle: () => {
+      const emojisPattern =
+        /[\u{1f300}-\u{1f5ff}\u{1f900}-\u{1f9ff}\u{1f600}-\u{1f64f}\u{1f680}-\u{1f6ff}\u{2600}-\u{26ff}\u{2700}-\u{27bf}\u{1f191}-\u{1f251}\u{1f004}\u{1f0cf}\u{1f170}-\u{1f171}\u{1f17e}-\u{1f17f}\u{1f18e}\u{3030}\u{2b50}\u{2b55}\u{2934}-\u{2935}\u{2b05}-\u{2b07}\u{2b1b}-\u{2b1c}\u{3297}\u{3299}\u{303d}\u{00a9}\u{00ae}\u{2122}\u{23f3}\u{24c2}\u{23e9}-\u{23ef}\u{25b6}\u{23f8}-\u{23fa}]/gu;
+      const titleEl = h.element('.p-title-value');
+      const rawTitle = titleEl ? titleEl.innerHTML : document.title || 'thread';
+      let parsed = h.stripTags(['a', 'span'], rawTitle).replace('/\n/g', '');
+      return !settings.naming.allowEmojis ? parsed.replace(emojisPattern, settings.naming.invalidCharSubstitute).trim() : parsed.trim();
+    },
+    /**
      *
      * @param post
      * @returns {{pageNumber: string, post, spoilers: *, footer: HTMLElement, contentContainer: Element, textContent: (*|string|string), postId: string, postNumber: string, content: (*|string|string|string)}}
      */
-        parsePost: post => {
-            const messageContent = post.parentNode.parentNode.querySelector('.message-content > .message-userContent');
-            const footer = post.parentNode.parentNode.querySelector('footer');
-            const messageContentClone = messageContent.cloneNode(true);
+    parsePost: post => {
+      const postContainer = post?.parentNode?.parentNode;
+      const messageContent = postContainer?.querySelector('.message-content > .message-userContent');
+      const footer = postContainer?.querySelector('footer');
 
-            const postIdAnchor = post.querySelector('li:last-of-type > a');
-            const postId = /(?<=\/post-).*/i.exec(postIdAnchor.getAttribute('href'))[0];
-            const postNumber = postIdAnchor.textContent.replace('#', '').trim();
+      if (!messageContent) {
+        return null;
+      }
 
-            // Remove the following from the post content:
-            // 1. Quotes.
-            // 2. CodeBlock headers
-            // 3. Spoiler button text from each spoiler
-            // 2. Icons from un-furled urls (url parser can sometimes match them).
-            ['.contentRow-figure', '.js-unfurl-favicon', 'blockquote', '.button-text > span']
-                .flatMap(i => [...messageContentClone.querySelectorAll(i)])
-                .forEach(i => {
-                if (i.tagName === 'BLOCKQUOTE') {
-                    // Only remove blockquotes that quote the other posts.
-                    if (i.querySelector('.bbCodeBlock-title')) {
-                        i.remove();
-                    }
-                } else {
-                    i.remove();
-                }
-            });
+      const messageContentClone = messageContent.cloneNode(true);
 
-            // Remove thread links.
-            [...messageContentClone.querySelectorAll('.contentRow-header > a[href^="https://simpcity.su/threads"]')]
-                .map(a => a.parentNode.parentNode.parentNode.parentNode)
-                .forEach(i => i.remove());
+      const postIdAnchor = post.querySelector('li:last-of-type > a');
+      if (!postIdAnchor) {
+        return null;
+      }
+      const postId = /(?<=\/post-).*/i.exec(postIdAnchor.getAttribute('href'))[0];
+      const postNumber = postIdAnchor.textContent.replace('#', '').trim();
 
-            // Prevent duplicate detection: Simpcity attachment links often wrap a JPGX preview image.
-            // For parsing only, remove the preview <img> inside attachment links so we don't count/download it twice.
+      // Remove the following from the post content:
+      // 1. Quotes.
+      // 2. CodeBlock headers
+      // 3. Spoiler button text from each spoiler
+      // 2. Icons from un-furled urls (url parser can sometimes match them).
+      ['.contentRow-figure', '.js-unfurl-favicon', 'blockquote', '.button-text > span']
+        .flatMap(i => [...messageContentClone.querySelectorAll(i)])
+        .forEach(i => {
+          if (i.tagName === 'BLOCKQUOTE') {
+            // Only remove blockquotes that quote the other posts.
+            if (i.querySelector('.bbCodeBlock-title')) {
+              i.remove();
+            }
+          } else {
+            i.remove();
+          }
+        });
+
+      // Remove thread links.
+      [...messageContentClone.querySelectorAll('.contentRow-header > a[href^="https://simpcity.su/threads"]')]
+        .map(a => a.parentNode.parentNode.parentNode.parentNode)
+        .forEach(i => i.remove());
+
+      // Prevent duplicate detection: Simpcity attachment links often wrap a JPGX preview image.
+      // For parsing only, remove the preview <img> inside attachment links so we don't count/download it twice.
+      try {
+        messageContentClone.querySelectorAll('a[href*="/attachments/"] img').forEach(img => img.remove());
+      } catch (e) {
+        /* ignore */
+      }
+
+      // Decode forum outbound link protection (e.g. /redirect/?to=...&m=b64) for parsing only.
+      // Some forums wrap external URLs in a redirect/proxy URL and store the real target in query params
+      // (often base64). If we don't decode it, host detection won't see the original domain.
+      try {
+        const __decodeB64Url = s => {
+          if (!s) return null;
+          let b = String(s).trim().replace(/-/g, '+').replace(/_/g, '/');
+          while (b.length % 4) b += '=';
+          try {
+            return atob(b);
+          } catch (e) {
+            return null;
+          }
+        };
+
+        const __decodeForumRedirect = href => {
+          if (!href) return null;
+          try {
+            const u = new URL(href, location.origin);
+            const p = (u.pathname || '').toLowerCase();
+
+            const looksRedirect = p === '/redirect' || p === '/redirect/' || p.startsWith('/redirect/');
+            const looksLinkProxy = p.includes('link-proxy');
+            if (!looksRedirect && !looksLinkProxy) return null;
+
+            const to =
+              u.searchParams.get('to') ||
+              u.searchParams.get('url') ||
+              u.searchParams.get('u') ||
+              u.searchParams.get('link') ||
+              u.searchParams.get('target');
+            if (!to) return null;
+
+            const mode = (u.searchParams.get('m') || '').toLowerCase();
+            let decoded = null;
+
+            if (mode === 'b64' || mode === 'base64') {
+              decoded = __decodeB64Url(to);
+            }
+
+            // Some installs omit the mode flag even though `to` is base64.
+            if (!decoded) {
+              const looksB64 = /^[A-Za-z0-9+/_-]+={0,2}$/.test(to) && to.length >= 16 && to.length % 4 !== 1;
+              if (looksB64) decoded = __decodeB64Url(to);
+            }
+
+            if (!decoded) {
+              try {
+                decoded = decodeURIComponent(to);
+              } catch (e) {
+                decoded = to;
+              }
+            }
+
+            decoded = String(decoded || '').trim();
+
+            // Some protectors double-encode.
+            if (decoded && !/^https?:\/\//i.test(decoded) && /%3a%2f%2f/i.test(decoded)) {
+              try {
+                const d2 = decodeURIComponent(decoded);
+                if (/^https?:\/\//i.test(d2)) decoded = d2;
+              } catch (e) {
+                /* ignore */
+              }
+            }
+
+            if (!/^https?:\/\//i.test(decoded)) return null;
+            return decoded;
+          } catch (e) {
+            return null;
+          }
+        };
+
+        const __imagebamFullFromThumb = thumbUrl => {
+          if (!thumbUrl) return null;
+          const s = String(thumbUrl).trim();
+          if (!s) return null;
+
+          try {
+            const u = new URL(s, location.origin);
+            const host = (u.hostname || '').toLowerCase();
+            if (!host.endsWith('.imagebam.com')) return null;
+            if (!host.startsWith('thumbs')) return null;
+
+            const newHost = host.replace(/^thumbs/i, 'images');
+            let path = u.pathname || '';
+            // common thumb naming: *_t.jpg
+            path = path.replace(/_t(\.[a-z0-9]+)$/i, '$1');
+            // some variants use -t
+            path = path.replace(/-t(\.[a-z0-9]+)$/i, '$1');
+
+            return `${u.protocol}//${newHost}${path}`;
+          } catch (e) {
+            return null;
+          }
+        };
+
+        const sel = ['a[href*="/redirect/"]', 'a[href^="/redirect"]', 'a[href*="redirect?"]', 'a[href*="link-proxy"]'].join(', ');
+
+        messageContentClone.querySelectorAll(sel).forEach(a => {
+          // Some XenForo installs store the redirect/protected URL in different attrs.
+          const candidates = [a.getAttribute('href'), a.getAttribute('data-href'), a.getAttribute('data-url')].filter(Boolean);
+
+          for (const c of candidates) {
+            const decoded = __decodeForumRedirect(c);
+            if (decoded) {
+              let finalUrl = decoded;
+              a.setAttribute('data-url', finalUrl);
+              a.setAttribute('href', finalUrl);
+              a.setAttribute('data-xfpd-decoded', '1');
+              break;
+            }
+          }
+        });
+
+        // Prevent common thumbnail URLs inside decoded redirect links from being treated as direct downloads.
+        // (Keeps the UI intact for non-thumb embeds, but avoids downloading *_t.jpg / thumbs.* previews.)
+        try {
+          messageContentClone.querySelectorAll('a[data-xfpd-decoded="1"] img').forEach(img => {
+            const u = (img.getAttribute('data-url') || img.getAttribute('src') || '').trim();
+            if (!u) return;
+
+            let host = '';
+            let path = '';
             try {
-                messageContentClone.querySelectorAll('a[href*="/attachments/"] img').forEach((img) => img.remove());
-            } catch (e) { /* ignore */ }
+              const uu = new URL(u, location.origin);
+              host = (uu.hostname || '').toLowerCase();
+              path = (uu.pathname || '').toLowerCase();
+            } catch (e) {
+              // ignore
+            }
 
+            const isThumb = host.includes('thumb') || /_t\.(?:jpe?g|png|webp|gif)$/i.test(u) || /\/thumbs?\//i.test(path);
 
-            // Decode forum outbound link protection (e.g. /redirect/?to=...&m=b64) for parsing only.
-            // Some forums wrap external URLs in a redirect/proxy URL and store the real target in query params
-            // (often base64). If we don't decode it, host detection won't see the original domain.
-            try {
-                const __decodeB64Url = (s) => {
-                    if (!s) return null;
-                    let b = String(s).trim().replace(/-/g, '+').replace(/_/g, '/');
-                    while (b.length % 4) b += '=';
-                    try { return atob(b); } catch (e) { return null; }
-                };
+            if (isThumb) img.remove();
+          });
+        } catch (e) {
+          /* ignore */
+        }
+      } catch (e) {
+        /* ignore */
+      }
 
-                const __decodeForumRedirect = (href) => {
-                    if (!href) return null;
-                    try {
-                        const u = new URL(href, location.origin);
-                        const p = (u.pathname || '').toLowerCase();
+      // Extract spoilers from the post content.
+      const spoilers = [...messageContentClone.querySelectorAll('.bbCodeBlock--spoiler > .bbCodeBlock-content')]
+        .filter(s => !s.querySelector('.bbCodeBlock--unfurl'))
+        .concat([...messageContentClone.querySelectorAll('.bbCodeInlineSpoiler')].filter(s => !s.querySelector('.bbCodeBlock--unfurl')))
+        .map(s => s.innerText)
+        .concat(
+          h.re
+            .matchAll(/(?<=pw|pass|passwd|password)(\s:|:)?\s+?[a-zA-Z0-9~!@#$%^&*()_+{}|:'"<>?\/,;.]+/gis, messageContentClone.innerText)
+            .map(s => s.trim()),
+        )
+        .map(s =>
+          s
+            .trim()
+            .replace(/^:/, '')
+            .replace(/\bp:\b/i, '')
+            .replace(/\bpw:\b/i, '')
+            .replace(/\bkey:\b/i, '')
+            .trim(),
+        )
+        .filter(s => s !== '')
+        .unique();
 
-                        const looksRedirect = p === '/redirect' || p === '/redirect/' || p.startsWith('/redirect/');
-                        const looksLinkProxy = p.includes('link-proxy');
-                        if (!looksRedirect && !looksLinkProxy) return null;
+      const postContent = messageContentClone.innerHTML;
+      const postTextContent = messageContentClone.innerText;
 
-                        const to = u.searchParams.get('to')
-                                 || u.searchParams.get('url')
-                                 || u.searchParams.get('u')
-                                 || u.searchParams.get('link')
-                                 || u.searchParams.get('target');
-                        if (!to) return null;
+      const matches = /(?<=\/page-)\d+/is.exec(document.location.pathname);
 
-                        const mode = (u.searchParams.get('m') || '').toLowerCase();
-                        let decoded = null;
+      const pageNumber = matches && matches.length ? Number(matches[0]) : 1;
 
-                        if (mode === 'b64' || mode === 'base64') {
-                            decoded = __decodeB64Url(to);
-                        }
-
-                        // Some installs omit the mode flag even though `to` is base64.
-                        if (!decoded) {
-                            const looksB64 = /^[A-Za-z0-9+/_-]+={0,2}$/.test(to) && to.length >= 16 && (to.length % 4 !== 1);
-                            if (looksB64) decoded = __decodeB64Url(to);
-                        }
-
-                        if (!decoded) {
-                            try { decoded = decodeURIComponent(to); } catch (e) { decoded = to; }
-                        }
-
-                        decoded = String(decoded || '').trim();
-
-                        // Some protectors double-encode.
-                        if (decoded && !/^https?:\/\//i.test(decoded) && /%3a%2f%2f/i.test(decoded)) {
-                            try {
-                                const d2 = decodeURIComponent(decoded);
-                                if (/^https?:\/\//i.test(d2)) decoded = d2;
-                            } catch (e) { /* ignore */ }
-                        }
-
-                        if (!/^https?:\/\//i.test(decoded)) return null;
-                        return decoded;
-                    } catch (e) {
-                        return null;
-                    }
-                };
-
-
-                const __imagebamFullFromThumb = (thumbUrl) => {
-                    if (!thumbUrl) return null;
-                    const s = String(thumbUrl).trim();
-                    if (!s) return null;
-
-                    try {
-                        const u = new URL(s, location.origin);
-                        const host = (u.hostname || '').toLowerCase();
-                        if (!host.endsWith('.imagebam.com')) return null;
-                        if (!host.startsWith('thumbs')) return null;
-
-                        const newHost = host.replace(/^thumbs/i, 'images');
-                        let path = u.pathname || '';
-                        // common thumb naming: *_t.jpg
-                        path = path.replace(/_t(\.[a-z0-9]+)$/i, '$1');
-                        // some variants use -t
-                        path = path.replace(/-t(\.[a-z0-9]+)$/i, '$1');
-
-                        return `${u.protocol}//${newHost}${path}`;
-                    } catch (e) {
-                        return null;
-                    }
-                };
-
-                const sel = [
-                    'a[href*="/redirect/"]',
-                    'a[href^="/redirect"]',
-                    'a[href*="redirect?"]',
-                    'a[href*="link-proxy"]',
-                ].join(', ');
-
-                messageContentClone.querySelectorAll(sel).forEach((a) => {
-                    // Some XenForo installs store the redirect/protected URL in different attrs.
-                    const candidates = [
-                        a.getAttribute('href'),
-                        a.getAttribute('data-href'),
-                        a.getAttribute('data-url'),
-                    ].filter(Boolean);
-
-                    for (const c of candidates) {
-                        const decoded = __decodeForumRedirect(c);
-                        if (decoded) {
-                            let finalUrl = decoded;
-a.setAttribute('data-url', finalUrl);
-                            a.setAttribute('href', finalUrl);
-                            a.setAttribute('data-xfpd-decoded', '1');
-                            break;
-                        }
-                    }
-                });
-
-                // Prevent common thumbnail URLs inside decoded redirect links from being treated as direct downloads.
-                // (Keeps the UI intact for non-thumb embeds, but avoids downloading *_t.jpg / thumbs.* previews.)
-                try {
-                    messageContentClone.querySelectorAll('a[data-xfpd-decoded="1"] img').forEach((img) => {
-                        const u = (img.getAttribute('data-url') || img.getAttribute('src') || '').trim();
-                        if (!u) return;
-
-                        let host = '';
-                        let path = '';
-                        try {
-                            const uu = new URL(u, location.origin);
-                            host = (uu.hostname || '').toLowerCase();
-                            path = (uu.pathname || '').toLowerCase();
-                        } catch (e) {
-                            // ignore
-                        }
-
-                        const isThumb =
-                            host.includes('thumb') ||
-                            /_t\.(?:jpe?g|png|webp|gif)$/i.test(u) ||
-                            /\/thumbs?\//i.test(path);
-
-                        if (isThumb) img.remove();
-                    });
-                } catch (e) { /* ignore */ }
-            } catch (e) { /* ignore */ }
-
-            // Extract spoilers from the post content.
-            const spoilers = [...messageContentClone.querySelectorAll('.bbCodeBlock--spoiler > .bbCodeBlock-content')]
-            .filter(s => !s.querySelector('.bbCodeBlock--unfurl'))
-            .concat([...messageContentClone.querySelectorAll('.bbCodeInlineSpoiler')].filter(s => !s.querySelector('.bbCodeBlock--unfurl')))
-            .map(s => s.innerText)
-            .concat(
-                h.re
-                .matchAll(/(?<=pw|pass|passwd|password)(\s:|:)?\s+?[a-zA-Z0-9~!@#$%^&*()_+{}|:'"<>?\/,;.]+/gis, messageContentClone.innerText)
-                .map(s => s.trim()),
-            )
-            .map(s =>
-                 s
-                 .trim()
-                 .replace(/^:/, '')
-                 .replace(/\bp:\b/i, '')
-                 .replace(/\bpw:\b/i, '')
-                 .replace(/\bkey:\b/i, '')
-                 .trim(),
-                )
-            .filter(s => s !== '')
-            .unique();
-
-            const postContent = messageContentClone.innerHTML;
-            const postTextContent = messageContentClone.innerText;
-
-            const matches = /(?<=\/page-)\d+/is.exec(document.location.pathname);
-
-            const pageNumber = matches && matches.length ? Number(matches[0]) : 1;
-
-            return {
-                post,
-                postId,
-                postNumber,
-                pageNumber,
-                spoilers,
-                footer,
-                content: postContent,
-                textContent: postTextContent,
-                contentContainer: messageContent,
-            };
-        },
+      return {
+        post,
+        postId,
+        postNumber,
+        pageNumber,
+        spoilers,
+        footer,
+        content: postContent,
+        textContent: postTextContent,
+        contentContainer: messageContent,
+      };
     },
-    hosts: {
-        /**
+  },
+  hosts: {
+    /**
      * @param postContent
      * @returns {(*&{id: number, enabled: boolean})[]}
      */
-        parseHosts: postContent => {
-            let parsed = [];
+    parseHosts: postContent => {
+      let parsed = [];
 
-            for (const host of hosts) {
-                // Require at-least the signature plus an array of matchers.
-                if (host.length < 2) {
-                    continue;
-                }
+      for (const host of hosts) {
+        // Require at-least the signature plus an array of matchers.
+        if (host.length < 2) {
+          continue;
+        }
 
-                const signature = host[0].split(':');
-                const matchers = host[1];
+        const signature = host[0].split(':');
+        const matchers = host[1];
 
-                if (!h.isArray(matchers) || !matchers.length) {
-                    continue;
-                }
+        if (!h.isArray(matchers) || !matchers.length) {
+          continue;
+        }
 
-                const name = signature[0];
-                let category = signature.length > 1 ? signature[1] : 'misc';
+        const name = signature[0];
+        let category = signature.length > 1 ? signature[1] : 'misc';
 
-                let singleMatcherPattern = matchers[0];
-                let albumMatcherPattern = matchers.length > 1 ? matchers[1] : null;
+        let singleMatcherPattern = matchers[0];
+        let albumMatcherPattern = matchers.length > 1 ? matchers[1] : null;
 
-                const execMatcher = matcher => {
-                    let pattern = matcher.toString().replace(/~an@/g, 'a-zA-Z0-9');
+        const execMatcher = matcher => {
+          let pattern = matcher.toString().replace(/~an@/g, 'a-zA-Z0-9');
 
-                    const stripQueryString = h.contains('<no_qs>', pattern.toString());
-                    const stripTrailingSlash = !h.contains('<keep_ts>', pattern.toString());
-                    pattern = pattern.replace('<no_qs>', '').replace('<keep_ts>', '');
+          const stripQueryString = h.contains('<no_qs>', pattern.toString());
+          const stripTrailingSlash = !h.contains('<keep_ts>', pattern.toString());
+          pattern = pattern.replace('<no_qs>', '').replace('<keep_ts>', '');
 
-                    if (h.contains('!!', pattern)) {
-                        pattern = pattern.replace('!!', '');
-                        pattern = h.re.toRegExp(h.re.toString(pattern), 'igs');
-                    } else {
-                        const pat = `(?<=data-url="|src="|href=")${h.re.toString(pattern)}.*?(?=")|https?:\/\/(www.)?${h.re.toString(pattern)}.*?(?=("|<|$|\]|'))`;
-                        pattern = h.re.toRegExp(pat, 'igs');
-                    }
+          if (h.contains('!!', pattern)) {
+            pattern = pattern.replace('!!', '');
+            pattern = h.re.toRegExp(h.re.toString(pattern), 'igs');
+          } else {
+            const pat = `(?<=data-url="|src="|href=")${h.re.toString(pattern)}.*?(?=")|https?:\/\/(www.)?${h.re.toString(pattern)}.*?(?=("|<|$|\]|'))`;
+            pattern = h.re.toRegExp(pat, 'igs');
+          }
 
-                    let matches = h.re.matchAll(pattern, postContent).unique();
+          let matches = h.re.matchAll(pattern, postContent).unique();
 
-                    matches = matches.map(url => {
-                // Some XenForo post HTML can leak into the match (e.g. trailing </a>...</div>), which then
-                // creates "ghost" resources (and broken filenames like "div>"). Strip anything after the URL.
-                url = String(url || '');
-                url = url.replace(/&amp;/g, '&');
-                url = url.split(/[\s"'<>]/)[0].trim();
-                // Normalize scheme so the same link in different representations dedupes cleanly.
-                if (url && !/^https?:\/\//i.test(url)) {
-                    url = `https://${url}`;
-                }
-
-                        if (stripQueryString && h.contains('?', url)) {
-                            url = url.substring(0, url.indexOf('?'));
-                        }
-
-                        if (stripTrailingSlash && url[url.length - 1]) {
-                            url = url[url.length - 1] === '/' ? url.substring(0, url.length - 1) : url;
-                        }
-
-                        return url.trim();
-                    });
-
-                    return h.unique(matches);
-                };
-
-                const categories = category.split(',');
-
-                if (singleMatcherPattern) {
-                    let singleCategory = [categories[0]].map(c => {
-                        if (c === 'image' || c === 'video') {
-                            return `${h.ucFirst(c)}s`;
-                        }
-
-                        if (c.trim() !== '') {
-                            return h.ucFirst(c);
-                        }
-
-                        return 'Links';
-                    })[0];
-
-                    parsed.push({
-                        name,
-                        type: 'single',
-                        category: singleCategory,
-                        resources: execMatcher(singleMatcherPattern),
-                    });
-                }
-
-                if (albumMatcherPattern) {
-                    let albumCategory = categories.length > 1 ? categories[1] : categories[0];
-
-                    albumCategory = `${h.ucFirst(albumCategory)} Albums`;
-
-                    parsed.push({
-                        name,
-                        type: 'album',
-                        category: albumCategory,
-                        resources: execMatcher(albumMatcherPattern),
-                    });
-                }
+          matches = matches.map(url => {
+            // Some XenForo post HTML can leak into the match (e.g. trailing </a>...</div>), which then
+            // creates "ghost" resources (and broken filenames like "div>"). Strip anything after the URL.
+            url = String(url || '');
+            url = url.replace(/&amp;/g, '&');
+            url = url.split(/[\s"'<>]/)[0].trim();
+            // Normalize scheme so the same link in different representations dedupes cleanly.
+            if (url && !/^https?:\/\//i.test(url)) {
+              url = `https://${url}`;
             }
 
-            return parsed
-                .map(p => ({
-                ...p,
-                enabled: true,
-                id: Math.round(Math.random() * Number.MAX_SAFE_INTEGER),
-            }))
-                .filter(p => p.resources.length);
-        },
+            if (stripQueryString && h.contains('?', url)) {
+              url = url.substring(0, url.indexOf('?'));
+            }
+
+            if (stripTrailingSlash && url[url.length - 1]) {
+              url = url[url.length - 1] === '/' ? url.substring(0, url.length - 1) : url;
+            }
+
+            return url.trim();
+          });
+
+          return h.unique(matches);
+        };
+
+        const categories = category.split(',');
+
+        if (singleMatcherPattern) {
+          let singleCategory = [categories[0]].map(c => {
+            if (c === 'image' || c === 'video') {
+              return `${h.ucFirst(c)}s`;
+            }
+
+            if (c.trim() !== '') {
+              return h.ucFirst(c);
+            }
+
+            return 'Links';
+          })[0];
+
+          parsed.push({
+            name,
+            type: 'single',
+            category: singleCategory,
+            resources: execMatcher(singleMatcherPattern),
+          });
+        }
+
+        if (albumMatcherPattern) {
+          let albumCategory = categories.length > 1 ? categories[1] : categories[0];
+
+          albumCategory = `${h.ucFirst(albumCategory)} Albums`;
+
+          parsed.push({
+            name,
+            type: 'album',
+            category: albumCategory,
+            resources: execMatcher(albumMatcherPattern),
+          });
+        }
+      }
+
+      return parsed
+        .map(p => ({
+          ...p,
+          enabled: true,
+          id: Math.round(Math.random() * Number.MAX_SAFE_INTEGER),
+        }))
+        .filter(p => p.resources.length);
     },
+  },
 };
 
 const styles = {
-    tippy: {
-        theme: `.tippy-box[data-theme~=transparent]{background-color:transparent}.tippy-box[data-theme~=transparent]>.tippy-arrow{width:14px;height:14px}.tippy-box[data-theme~=transparent][data-placement^=top]>.tippy-arrow:before{border-width:7px 7px 0;border-top-color:#3f3f3f}.tippy-box[data-theme~=transparent][data-placement^=bottom]>.tippy-arrow:before{border-width:1 7px 7px;border-bottom-color:#3f3f3f}.tippy-box[data-theme~=transparent][data-placement^=left]>.tippy-arrow:before{border-width:7px 0 7px 7px;border-left-color:#3f3f3f}.tippy-box[data-theme~=transparent][data-placement^=right]>.tippy-arrow:before{border-width:7px 7px 7px 0;border-right-color:#3f3f3f}.tippy-box[data-theme~=transparent]>.tippy-backdrop{background-color:transparent;}.tippy-box[data-theme~=transparent]>.tippy-svg-arrow{fill:gainsboro}`,
-    },
+  tippy: {
+    theme: `.tippy-box[data-theme~=transparent]{background-color:transparent}.tippy-box[data-theme~=transparent]>.tippy-arrow{width:14px;height:14px}.tippy-box[data-theme~=transparent][data-placement^=top]>.tippy-arrow:before{border-width:7px 7px 0;border-top-color:#3f3f3f}.tippy-box[data-theme~=transparent][data-placement^=bottom]>.tippy-arrow:before{border-width:1 7px 7px;border-bottom-color:#3f3f3f}.tippy-box[data-theme~=transparent][data-placement^=left]>.tippy-arrow:before{border-width:7px 0 7px 7px;border-left-color:#3f3f3f}.tippy-box[data-theme~=transparent][data-placement^=right]>.tippy-arrow:before{border-width:7px 7px 7px 0;border-right-color:#3f3f3f}.tippy-box[data-theme~=transparent]>.tippy-backdrop{background-color:transparent;}.tippy-box[data-theme~=transparent]>.tippy-svg-arrow{fill:gainsboro}`,
+  },
 };
 
 const ui = {
-    /**
+  /**
    * @returns {string}
    */
-    getTooltipBackgroundColor: () => {
-        const scheme = document.documentElement.dataset.colorScheme;
-        return scheme === 'dark' ? '#2B2B2B' : '#EDF0F3';
-    },
+  getTooltipBackgroundColor: () => {
+    const scheme = document.documentElement.dataset.colorScheme;
+    return scheme === 'dark' ? '#2B2B2B' : '#EDF0F3';
+  },
 
-    /**
+  /**
    * @param target
    * @param content
    * @param options
    * @returns {*}
    */
-    tooltip: (target, content, options = {}) => {
-        // noinspection JSUnusedGlobalSymbols
-        return tippy(target, {
-            arrow: true,
-            theme: 'transparent',
-            allowHTML: true,
-            content: content,
-            appendTo: () => document.body,
-            placement: 'left',
-            interactive: true,
-            ...options,
-        });
-    },
-    pBars: {
-        /**
+  tooltip: (target, content, options = {}) => {
+    // noinspection JSUnusedGlobalSymbols
+    return tippy(target, {
+      arrow: true,
+      theme: 'transparent',
+      allowHTML: true,
+      content: content,
+      appendTo: () => document.body || document.documentElement,
+      placement: 'left',
+      interactive: true,
+      ...options,
+    });
+  },
+  pBars: {
+    /**
      * @param color
      * @param height
      * @param width
      * @returns {HTMLDivElement}
      */
-        base: (color, height = '3px', width = '0%') => {
-            const pb = document.createElement('div');
-            pb.style.height = height;
-            pb.style.background = color;
-            pb.style.width = width;
-            return pb;
-        },
-        /**
-     * @param color
-     * @returns {HTMLDivElement}
-     */
-        createFileProgressBar: (color = '#46658b') => {
-            const pb = ui.pBars.base(color);
-            pb.style.marginBottom = '1px';
-            return pb;
-        },
-        /**
-     * @param color
-     * @returns {HTMLDivElement}
-     */
-        createTotalProgressBar: (color = '#545454') => {
-            const pb = ui.pBars.base(color);
-            pb.style.marginBottom = '10px';
-            return pb;
-        },
+    base: (color, height = '3px', width = '0%') => {
+      const pb = document.createElement('div');
+      pb.style.height = height;
+      pb.style.background = color;
+      pb.style.width = width;
+      return pb;
     },
-    labels: {
-        /**
+    /**
+     * @param color
+     * @returns {HTMLDivElement}
+     */
+    createFileProgressBar: (color = '#46658b') => {
+      const pb = ui.pBars.base(color);
+      pb.style.marginBottom = '1px';
+      return pb;
+    },
+    /**
+     * @param color
+     * @returns {HTMLDivElement}
+     */
+    createTotalProgressBar: (color = '#545454') => {
+      const pb = ui.pBars.base(color);
+      pb.style.marginBottom = '10px';
+      return pb;
+    },
+  },
+  labels: {
+    /**
      * @param initialText
      * @param color
      * @returns {{container: HTMLDivElement, el: HTMLSpanElement}}
      */
-        createBlockLabel: (initialText = null, color = '#959595') => {
-            const container = document.createElement('div');
-            container.style.color = color;
-            container.style.fontSize = '12px';
+    createBlockLabel: (initialText = null, color = '#959595') => {
+      const container = document.createElement('div');
+      container.style.color = color;
+      container.style.fontSize = '12px';
 
-            const span = document.createElement('span');
-            container.appendChild(span);
+      const span = document.createElement('span');
+      container.appendChild(span);
 
-            if (initialText) {
-                span.textContent = initialText;
-            }
+      if (initialText) {
+        span.textContent = initialText;
+      }
 
-            return {
-                el: span,
-                container,
-            };
-        },
-        status: {
-            /**
+      return {
+        el: span,
+        container,
+      };
+    },
+    status: {
+      /**
        * @param initialText
        * @returns {{container: HTMLDivElement, el: HTMLSpanElement}}
        */
-            createStatusLabel: (initialText = '') => {
-                const label = ui.labels.createBlockLabel(initialText);
-                label.el.style.marginBottom = '3px';
+      createStatusLabel: (initialText = '') => {
+        const label = ui.labels.createBlockLabel(initialText);
+        label.el.style.marginBottom = '3px';
 
-                return label;
-            },
-        },
+        return label;
+      },
     },
-    buttons: {
-        /**
+  },
+  buttons: {
+    /**
      * @returns {HTMLAnchorElement}
      */
-        createPostDownloadButton: () => {
-            const downloadPostBtn = document.createElement('a');
-            downloadPostBtn.setAttribute('href', '#');
-            downloadPostBtn.innerHTML = '🡳 Download';
+    createPostDownloadButton: () => {
+      const downloadPostBtn = document.createElement('a');
+      downloadPostBtn.setAttribute('href', '#');
+      downloadPostBtn.setAttribute('data-xfpd-post-download', '1');
+      downloadPostBtn.innerHTML = '🡳 Download';
 
-            return downloadPostBtn;
-        },
-        /**
+      return downloadPostBtn;
+    },
+    /**
      * @returns {HTMLLIElement}
      */
-        createPostDownloadButtonContainer: () => {
-            return document.createElement('li');
-        },
-        /**
+    createPostDownloadButtonContainer: () => {
+      return document.createElement('li');
+    },
+    /**
      * @param post
      * @returns {{container: HTMLLIElement, btn: HTMLAnchorElement}}
      */
-        addDownloadPostButton: post => {
-            const btnDownloadPostContainer = ui.buttons.createPostDownloadButtonContainer();
-            const btnDownloadPost = ui.buttons.createPostDownloadButton();
-            btnDownloadPostContainer.appendChild(btnDownloadPost);
-            post.prepend(btnDownloadPostContainer);
+    addDownloadPostButton: post => {
+      if (!post || typeof post.prepend !== 'function') {
+        return { container: null, btn: null };
+      }
 
-            return {
-                container: btnDownloadPostContainer,
-                btn: btnDownloadPost,
-            };
-        },
+      const btnDownloadPostContainer = ui.buttons.createPostDownloadButtonContainer();
+      const btnDownloadPost = ui.buttons.createPostDownloadButton();
+      btnDownloadPostContainer.appendChild(btnDownloadPost);
+      post.prepend(btnDownloadPostContainer);
+
+      return {
+        container: btnDownloadPostContainer,
+        btn: btnDownloadPost,
+      };
     },
-    forms: {
-        /**
+  },
+  forms: {
+    /**
      * @param id
      * @param label
      * @param checked
      * @returns {string}
      */
-        createCheckbox: (id, label, checked) => {
-            return `
+    createCheckbox: (id, label, checked) => {
+      return `
           <div class="menu-row" style="margin-top: -5px;">
             <label class="iconic" style="user-select: none">
               <input type="checkbox" ${checked ? 'checked="checked"' : ''} id="${id}" />
@@ -1720,195 +1782,210 @@ const ui = {
           </div>
           `;
 
-                    let formHtml = [
-                        window.isFF ? ui.forms.config.post.createFilenameInput(customFilename, postId, color, defaultFilename) : null,
-                        settingsHeading,
-                        ui.forms.config.post.createZippedCheckbox(postId, settings.zipped),                        ui.forms.config.post.createFlattenCheckbox(postId, settings.flatten),
-                        ui.forms.config.post.createSkipDuplicatesCheckbox(postId, settings.skipDuplicates),
-                        ui.forms.config.post.createGenerateLinksCheckbox(postId, settings.generateLinks),
-                        ui.forms.config.post.createGenerateLogCheckbox(postId, settings.generateLog),
-                        ui.forms.config.post.createSkipDownloadCheckbox(postId, settings.skipDownload),
-                        ui.forms.config.post.createVerifyBunkrLinksCheckbox(postId, settings.verifyBunkrLinks),
-                        ui.forms.config.post.createHostCheckboxes(postId, filterLabel, hostsHtml, parsedHosts.length > 1),
-                        ui.forms.createRow(
-                            '<a href="#download-page" style="color: #3DB7C7; font-weight: bold"><i class="fa fa-arrow-up"></i> Show Download Page Button</a>',
-                        ),
-                    ].filter(c => c !== null);
+          let formHtml = [
+            window.isFF ? ui.forms.config.post.createFilenameInput(customFilename, postId, color, defaultFilename) : null,
+            settingsHeading,
+            ui.forms.config.post.createZippedCheckbox(postId, settings.zipped),
+            ui.forms.config.post.createFlattenCheckbox(postId, settings.flatten),
+            ui.forms.config.post.createSkipDuplicatesCheckbox(postId, settings.skipDuplicates),
+            ui.forms.config.post.createGenerateLinksCheckbox(postId, settings.generateLinks),
+            ui.forms.config.post.createGenerateLogCheckbox(postId, settings.generateLog),
+            ui.forms.config.post.createSkipDownloadCheckbox(postId, settings.skipDownload),
+            ui.forms.config.post.createVerifyBunkrLinksCheckbox(postId, settings.verifyBunkrLinks),
+            ui.forms.config.post.createHostCheckboxes(postId, filterLabel, hostsHtml, parsedHosts.length > 1),
+            ui.forms.createRow(
+              '<a href="#download-page" style="color: #3DB7C7; font-weight: bold"><i class="fa fa-arrow-up"></i> Show Download Page Button</a>',
+            ),
+          ].filter(c => c !== null);
 
-                    const configForm = ui.forms.config.post.createForm(postId, color, formHtml.join(''));
+          const configForm = ui.forms.config.post.createForm(postId, color, formHtml.join(''));
 
-                    ui.tooltip(btnDownloadPost, configForm, {
-                        onShown: instance => {
-                            const inputEl = h.element(`#filename-input-${postId}`);
-                            if (inputEl) {
-                                inputEl.addEventListener('input', e => {
-                                    const value = e.target.value;
-                                    const o = settings.output.find(o => o.postId === postId);
-                                    if (o) {
-                                        o.value = value;
-                                    } else {
-                                        settings.output.push({
-                                            postId,
-                                            value,
-                                        });
-                                    }
-                                });
-                            }
-
-                            let prevSettings = JSON.parse(JSON.stringify(settings));
-
-                            const setPrevSettings = settings => {
-                                prevSettings = JSON.parse(JSON.stringify(settings));
-                            };
-
-                            let updateSettings = true;
-
-                            h.element(`#settings-${postId}-skip-download`).addEventListener('change', e => {
-                                const checked = e.target.checked;
-
-                                settings.skipDownload = checked;
-
-                                settings.flatten = checked ? false : prevSettings.flatten;
-                                settings.skipDuplicates = checked ? false : prevSettings.skipDuplicates;
-                                settings.generateLinks = checked ? true : prevSettings.generateLinks;
-
-                                updateSettings = false;
-
-                                h.element(`#settings-${postId}-flatten`).checked = checked ? false : prevSettings.flatten;
-                                h.element(`#settings-${postId}-flatten`).disabled = checked;
-
-                                h.element(`#settings-${postId}-skip-duplicates`).checked = checked ? false : prevSettings.skipDuplicates;
-                                h.element(`#settings-${postId}-skip-duplicates`).disabled = checked;
-
-                                h.element(`#settings-${postId}-generate-links`).checked = checked ? true : prevSettings.generateLinks;
-                                h.element(`#settings-${postId}-generate-links`).disabled = checked;
-
-                                setTimeout(() => (updateSettings = true), 100);
-                            });
-
-                            h.element(`#settings-${postId}-verify-bunkr-links`).addEventListener('change', e => {
-                                settings.verifyBunkrLinks = e.target.checked;
-                            });
-                            h.element(`#settings-${postId}-zipped`).addEventListener('change', e => {
-                                settings.zipped = e.target.checked;                                if (updateSettings) {
-                                    setPrevSettings(settings);
-                                }
-                            });
-h.element(`#settings-${postId}-generate-links`).addEventListener('change', e => {
-                                settings.generateLinks = e.target.checked;
-
-                                if (updateSettings) {
-                                    setPrevSettings(settings);
-                                }
-                            });
-
-                            h.element(`#settings-${postId}-generate-log`).addEventListener('change', e => {
-                                settings.generateLog = e.target.checked;
-
-                                if (updateSettings) {
-                                    setPrevSettings(settings);
-                                }
-                            });
-
-                            h.element(`#settings-${postId}-flatten`).addEventListener('change', e => {
-                                settings.flatten = e.target.checked;
-
-                                if (updateSettings) {
-                                    setPrevSettings(settings);
-                                }
-                            });
-
-                            h.element(`#settings-${postId}-skip-duplicates`).addEventListener('change', e => {
-                                settings.skipDuplicates = e.target.checked;
-
-                                if (updateSettings) {
-                                    setPrevSettings(settings);
-                                }
-                            });
-
-                            h.element(`#download-config-form-${postId}`).addEventListener('submit', async e => {
-                                e.preventDefault();
-                                onSubmitFormCB({ tippyInstance: instance });
-                            });
-
-                            if (parsedHosts.length > 1) {
-                                h.element(`#settings-toggle-all-hosts-${postId}`).addEventListener('change', async e => {
-                                    e.preventDefault();
-
-                                    const checked = e.target.checked;
-
-                                    const hostCheckboxes = parsedHosts.flatMap(host => h.element(`#downloader-host-${host.id}-${postId}`));
-                                    const checkedHostCheckboxes = hostCheckboxes.filter(e => e.checked);
-                                    const unCheckedHostCheckboxes = hostCheckboxes.filter(e => !e.checked);
-
-                                    if (checked) {
-                                        unCheckedHostCheckboxes.forEach(c => c.click());
-                                    } else {
-                                        checkedHostCheckboxes.forEach(c => c.click());
-                                    }
-                                });
-                            }
-
-                            parsedHosts.forEach(host => {
-                                h.element(`#downloader-host-${host.id}-${postId}`).addEventListener('change', e => {
-                                    host.enabled = e.target.checked;
-                                    const filteredCount = totalDownloadableResourcesForPostCB(parsedHosts);
-                                    h.element('#filtered-count').textContent = `(${filteredCount})`;
-
-                                    if (parsedHosts.length > 0) {
-                                        const checkedLength = parsedHosts
-                                        .flatMap(host => h.element(`#downloader-host-${host.id}-${postId}`))
-                                        .filter(h => h.checked).length;
-
-                                        const totalResources = parsedHosts.reduce((acc, host) => acc + host.resources.length, 0);
-
-                                        const totalDownloadableResources = parsedHosts
-                                        .filter(host => host.enabled && host.resources.length)
-                                        .reduce((acc, host) => acc + host.resources.length, 0);
-
-                                        btnDownloadPost.innerHTML = `🡳 Download (${totalDownloadableResources}/${totalResources})`;
-
-                                        if (parsedHosts.length > 1) {
-                                            const toggleAllHostsCheckbox = h.element(`#settings-toggle-all-hosts-${postId}`);
-
-                                            if (checkedLength !== parsedHosts.length) {
-                                                toggleAllHostsCheckbox.removeAttribute('checked');
-                                                toggleAllHostsCheckbox.checked = false;
-                                            } else {
-                                                toggleAllHostsCheckbox.setAttribute('checked', 'checked');
-                                                toggleAllHostsCheckbox.checked = true;
-                                            }
-                                        }
-                                    }
-                                });
-                            });
-                        },
+          ui.tooltip(btnDownloadPost, configForm, {
+            onShown: instance => {
+              const inputEl = h.element(`#filename-input-${postId}`);
+              if (inputEl) {
+                inputEl.addEventListener('input', e => {
+                  const value = e.target.value;
+                  const o = settings.output.find(o => o.postId === postId);
+                  if (o) {
+                    o.value = value;
+                  } else {
+                    settings.output.push({
+                      postId,
+                      value,
                     });
-                },
+                  }
+                });
+              }
+
+              let prevSettings = JSON.parse(JSON.stringify(settings));
+
+              const setPrevSettings = settings => {
+                prevSettings = JSON.parse(JSON.stringify(settings));
+              };
+
+              let updateSettings = true;
+
+              h.element(`#settings-${postId}-skip-download`).addEventListener('change', e => {
+                const checked = e.target.checked;
+
+                settings.skipDownload = checked;
+
+                settings.flatten = checked ? false : prevSettings.flatten;
+                settings.skipDuplicates = checked ? false : prevSettings.skipDuplicates;
+                settings.generateLinks = checked ? true : prevSettings.generateLinks;
+
+                updateSettings = false;
+
+                h.element(`#settings-${postId}-flatten`).checked = checked ? false : prevSettings.flatten;
+                h.element(`#settings-${postId}-flatten`).disabled = checked;
+
+                h.element(`#settings-${postId}-skip-duplicates`).checked = checked ? false : prevSettings.skipDuplicates;
+                h.element(`#settings-${postId}-skip-duplicates`).disabled = checked;
+
+                h.element(`#settings-${postId}-generate-links`).checked = checked ? true : prevSettings.generateLinks;
+                h.element(`#settings-${postId}-generate-links`).disabled = checked;
+
+                setTimeout(() => (updateSettings = true), 100);
+              });
+
+              h.element(`#settings-${postId}-verify-bunkr-links`).addEventListener('change', e => {
+                settings.verifyBunkrLinks = e.target.checked;
+              });
+              h.element(`#settings-${postId}-zipped`).addEventListener('change', e => {
+                settings.zipped = e.target.checked;
+                if (updateSettings) {
+                  setPrevSettings(settings);
+                }
+              });
+              h.element(`#settings-${postId}-generate-links`).addEventListener('change', e => {
+                settings.generateLinks = e.target.checked;
+
+                if (updateSettings) {
+                  setPrevSettings(settings);
+                }
+              });
+
+              h.element(`#settings-${postId}-generate-log`).addEventListener('change', e => {
+                settings.generateLog = e.target.checked;
+
+                if (updateSettings) {
+                  setPrevSettings(settings);
+                }
+              });
+
+              h.element(`#settings-${postId}-flatten`).addEventListener('change', e => {
+                settings.flatten = e.target.checked;
+
+                if (updateSettings) {
+                  setPrevSettings(settings);
+                }
+              });
+
+              h.element(`#settings-${postId}-skip-duplicates`).addEventListener('change', e => {
+                settings.skipDuplicates = e.target.checked;
+
+                if (updateSettings) {
+                  setPrevSettings(settings);
+                }
+              });
+
+              h.element(`#download-config-form-${postId}`).addEventListener('submit', async e => {
+                e.preventDefault();
+                onSubmitFormCB({ tippyInstance: instance });
+              });
+
+              if (parsedHosts.length > 1) {
+                h.element(`#settings-toggle-all-hosts-${postId}`).addEventListener('change', async e => {
+                  e.preventDefault();
+
+                  const checked = e.target.checked;
+
+                  const hostCheckboxes = parsedHosts.flatMap(host => h.element(`#downloader-host-${host.id}-${postId}`));
+                  const checkedHostCheckboxes = hostCheckboxes.filter(e => e.checked);
+                  const unCheckedHostCheckboxes = hostCheckboxes.filter(e => !e.checked);
+
+                  if (checked) {
+                    unCheckedHostCheckboxes.forEach(c => c.click());
+                  } else {
+                    checkedHostCheckboxes.forEach(c => c.click());
+                  }
+                });
+              }
+
+              parsedHosts.forEach(host => {
+                h.element(`#downloader-host-${host.id}-${postId}`).addEventListener('change', e => {
+                  host.enabled = e.target.checked;
+                  const filteredCount = totalDownloadableResourcesForPostCB(parsedHosts);
+                  h.element('#filtered-count').textContent = `(${filteredCount})`;
+
+                  if (parsedHosts.length > 0) {
+                    const checkedLength = parsedHosts
+                      .flatMap(host => h.element(`#downloader-host-${host.id}-${postId}`))
+                      .filter(h => h.checked).length;
+
+                    const totalResources = parsedHosts.reduce((acc, host) => acc + host.resources.length, 0);
+
+                    const totalDownloadableResources = parsedHosts
+                      .filter(host => host.enabled && host.resources.length)
+                      .reduce((acc, host) => acc + host.resources.length, 0);
+
+                    btnDownloadPost.innerHTML = `🡳 Download (${totalDownloadableResources}/${totalResources})`;
+
+                    if (parsedHosts.length > 1) {
+                      const toggleAllHostsCheckbox = h.element(`#settings-toggle-all-hosts-${postId}`);
+
+                      if (checkedLength !== parsedHosts.length) {
+                        toggleAllHostsCheckbox.removeAttribute('checked');
+                        toggleAllHostsCheckbox.checked = false;
+                      } else {
+                        toggleAllHostsCheckbox.setAttribute('checked', 'checked');
+                        toggleAllHostsCheckbox.checked = true;
+                      }
+                    }
+                  }
+                });
+              });
             },
+          });
         },
+      },
     },
+  },
 };
 
 const init = {
-    injectCustomStyles: () => {
-        // Tippy transparent theme.
-        const styleEl = document.createElement('style');
-        styleEl.textContent = styles.tippy.theme;
-        document.head.append(styleEl);
+  injectCustomStyles: () => {
+    const styleTarget = document.head || document.documentElement || document.body;
+    if (!styleTarget) {
+      return false;
+    }
 
-        const customStyles = document.createElement('style');
-        // Margins classes
-        const marginClasses = [];
+    // Tippy transparent theme.
+    if (!document.getElementById('xfpd-tippy-theme')) {
+      const styleEl = document.createElement('style');
+      styleEl.id = 'xfpd-tippy-theme';
+      styleEl.textContent = styles.tippy.theme;
+      styleTarget.append(styleEl);
+    }
 
-        for (let i = 1; i <= 15; i++) {
-            marginClasses.push(`.m-l-${i} {margin-left: ${i}px;}`);
-            marginClasses.push(`.m-t-${i} {margin-top: ${i}px;}`);
-        }
+    if (!document.getElementById('xfpd-custom-styles')) {
+      const customStyles = document.createElement('style');
+      customStyles.id = 'xfpd-custom-styles';
+      // Margins classes
+      const marginClasses = [];
 
-        customStyles.textContent = marginClasses.join('\n');
-        document.head.append(customStyles);
-    },
+      for (let i = 1; i <= 15; i++) {
+        marginClasses.push(`.m-l-${i} {margin-left: ${i}px;}`);
+        marginClasses.push(`.m-t-${i} {margin-top: ${i}px;}`);
+      }
+
+      customStyles.textContent = marginClasses.join('\n');
+      styleTarget.append(customStyles);
+    }
+
+    return true;
+  },
 };
 // Holds the posts that are processing downloads.
 let processing = [];
@@ -1954,52 +2031,63 @@ let processing = [];
  *
  */
 const hosts = [
-    ['Simpcity:Attachments', [/(\/attachments\/|\/data\/video\/)/]],
-    ['Coomer:Profiles', [/coomer.st\/[~an@._-]+\/user/]],
-    ['Coomer:image', [/(\w+\.)?coomer.st\/(data|thumbnail)/]],
-    ['JPGX:image', [/(simp\d+\.)?(selti-delivery\.ru|jpg\d?\.(church|fish|fishing|pet|su|cr))\/(?!(img\/|a\/|album\/))/, /jpe?g\d\.(church|fish|fishing|pet|su|cr)(\/a\/|\/album\/)[~an@-_.]+<no_qs>/]],
-    ['kemono:direct link', [/.{2,6}\.kemono.cr\/data\//]],
-    ['Postimg:image', [/!!https?:\/\/(www.)?i\.?(postimg|pixxxels).cc\/(.{8})/]], //[/!!https?:\/\/(www.)?postimg.cc\/(.{8})/]],
-    ['Ibb:image',
-     [
-         /!!(?<=href=")https?:\/\/(www.)?([a-z](\d+)?\.)?ibb\.co\/([a-zA-Z0-9_.-]){7}((?=")|\/)(([a-zA-Z0-9_.-])+(?="))?/,
-         /ibb.co\/album\/[~an@_.-]+/,
-     ],
+  ['Simpcity:Attachments', [/(\/attachments\/|\/data\/video\/)/]],
+  ['Coomer:Profiles', [/coomer.st\/[~an@._-]+\/user/]],
+  ['Coomer:image', [/(\w+\.)?coomer.st\/(data|thumbnail)/]],
+  [
+    'JPGX:image',
+    [
+      /(simp\d+\.)?(selti-delivery\.ru|jpg\d?\.(church|fish|fishing|pet|su|cr))\/(?!(img\/|a\/|album\/))/,
+      /jpe?g\d\.(church|fish|fishing|pet|su|cr)(\/a\/|\/album\/)[~an@-_.]+<no_qs>/,
     ],
-    ['Ibb:direct link', [/!!(?<=data-src=")https?:\/\/(www.)?([a-z](\d+)?\.)?ibb\.co\/([a-zA-Z0-9_.-]){7}((?=")|\/)(([a-zA-Z0-9_.-])+(?="))?/]],
-    ['Imagevenue:image', [/!!https?:\/\/(www.)?imagevenue\.com\/(.{8})/]],
-    ['Imgvb:image', [/imgvb.com\/images\//, /imgvb.com\/album/]],
-    ['Imgbox:image', [/(thumbs|images)(\d+)?.imgbox.com\//, /imgbox.com\/g\//]],
-    ['Onlyfans:image', [/public.onlyfans.com\/files/]],
-    ['Reddit:image', [/(\w+)?.redd.it/]],
-    ['Pomf2:File', [/pomf2.lain.la/]],
-    ['Nitter:image', [/nitter\.(.{1,20})\/pic/]],
-    ['Twitter:image', [/([~an@.]+)?twimg.com\//]],
-    ['Pixhost:image', [/(t|img)(\d+)?\.pixhost.to\//, /pixhost.to\/gallery\//]],
-    ['Imagebam:image', [/imagebam.com\/(view|gallery)/]],
-    ['Imagebam:full embed', [/images\d.imagebam.com/]],
-    ['turbo:video', [/([\w-]+\.)?turbo\.cr\/(embed|v|d)\//]],
-    ['turbo:albums', [/([\w-]+\.)?turbo\.cr\/a\//]],
-    ['Redgifs:video', [/!!redgifs.com(\/|\\\/)ifr.*?(?=["']|&quot;)/]],
-    ['Redgifs:user', [/redgifs\.com\/users\//]],
-    ['Bunkr:',
-     [
-         /!!(?<=href=")https:\/\/((stream|cdn(\d+)?)\.)?bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|ru|su|org)(?!(\/a\/)).*?(?=")|(?<=(href=")|(src="))https:\/\/((i|cdn|i-pizza|big-taco-1img)(\d+)?\.)?bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|ru|su|org)(?!(\/a\/))\/(v\/)?.*?(?=")/,
-     ]
+  ],
+  ['kemono:direct link', [/.{2,6}\.kemono.cr\/data\//]],
+  ['Postimg:image', [/!!https?:\/\/(www.)?i\.?(postimg|pixxxels).cc\/(.{8})/]], //[/!!https?:\/\/(www.)?postimg.cc\/(.{8})/]],
+  [
+    'Ibb:image',
+    [
+      /!!(?<=href=")https?:\/\/(www.)?([a-z](\d+)?\.)?ibb\.co\/([a-zA-Z0-9_.-]){7}((?=")|\/)(([a-zA-Z0-9_.-])+(?="))?/,
+      /ibb.co\/album\/[~an@_.-]+/,
     ],
-    ['Bunkr:Albums', [/bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|ru|su|org)\/a\//]],
-    ['Give.xxx:Profiles', [/give.xxx\/[~an@_-]+/]],
-    ['Pixeldrain:', [/(focus\.)?(?:pixeldrain\.com|pixeldrain\.net|pixeldra\.in)\/[lu]\//]],
-    ['Gofile:', [/gofile.io\/d/]],
-    ['Filester:links', [/filester\.me\/d\//]],
-    ['Filester:albums', [/filester\.me\/f\/[~an@-_.]+<no_qs>/]],
-    ['Box.com:', [/m\.box\.com\//]],
-    ['Yandex:', [/(disk\.)?yandex\.[a-z]+/]],
-    ['Cyberfile:', [/!!https:\/\/cyberfile.(su|me)\/\w+(\/)?(?=")/, /cyberfile.(su|me)\/folder\//]],
-    ['Cyberdrop:', [/fs-\d+\.cyberdrop\.[a-z]{2,}\/|cyberdrop\.[a-z]{2,}\/(f|e)\//, /cyberdrop\.[a-z]{2,}\/a\//]],
-    ['Pornhub:video', [/([~an@]+\.)?pornhub.com\/view_video/]],
-    ['Noodlemagazine:video', [/(adult.)?noodlemagazine.com\/watch\//]],
-    ['Spankbang:video', [/spankbang.com\/.*?\/video/]],
+  ],
+  [
+    'Ibb:direct link',
+    [/!!(?<=data-src=")https?:\/\/(www.)?([a-z](\d+)?\.)?ibb\.co\/([a-zA-Z0-9_.-]){7}((?=")|\/)(([a-zA-Z0-9_.-])+(?="))?/],
+  ],
+  ['Imagevenue:image', [/!!https?:\/\/(www.)?imagevenue\.com\/(.{8})/]],
+  ['Imgvb:image', [/imgvb.com\/images\//, /imgvb.com\/album/]],
+  ['Imgbox:image', [/(thumbs|images)(\d+)?.imgbox.com\//, /imgbox.com\/g\//]],
+  ['Onlyfans:image', [/public.onlyfans.com\/files/]],
+  ['Reddit:image', [/(\w+)?.redd.it/]],
+  ['Pomf2:File', [/pomf2.lain.la/]],
+  ['Nitter:image', [/nitter\.(.{1,20})\/pic/]],
+  ['Twitter:image', [/([~an@.]+)?twimg.com\//]],
+  ['Pixhost:image', [/(t|img)(\d+)?\.pixhost.to\//, /pixhost.to\/gallery\//]],
+  ['Imagebam:image', [/imagebam.com\/(view|gallery)/]],
+  ['Imagebam:full embed', [/images\d.imagebam.com/]],
+  ['turbo:video', [/([\w-]+\.)?turbo\.cr\/(embed|v|d)\//]],
+  ['turbo:albums', [/([\w-]+\.)?turbo\.cr\/a\//]],
+  ['Redgifs:video', [/!!redgifs.com(\/|\\\/)ifr.*?(?=["']|&quot;)/]],
+  ['Redgifs:user', [/redgifs\.com\/users\//]],
+  [
+    'Bunkr:',
+    [
+      /!!(?<=href=")https:\/\/((stream|cdn(\d+)?)\.)?bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|ru|su|org)(?!(\/a\/)).*?(?=")|(?<=(href=")|(src="))https:\/\/((i|cdn|i-pizza|big-taco-1img)(\d+)?\.)?bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|ru|su|org)(?!(\/a\/))\/(v\/)?.*?(?=")/,
+    ],
+  ],
+  ['Bunkr:Albums', [/bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|ru|su|org)\/a\//]],
+  ['Give.xxx:Profiles', [/give.xxx\/[~an@_-]+/]],
+  ['Pixeldrain:', [/(focus\.)?(?:pixeldrain\.com|pixeldrain\.net|pixeldra\.in)\/[lu]\//]],
+  ['Gofile:', [/gofile.io\/d/]],
+  ['Filester:links', [/filester\.me\/d\//]],
+  ['Filester:albums', [/filester\.me\/f\/[~an@-_.]+<no_qs>/]],
+  ['Box.com:', [/m\.box\.com\//]],
+  ['Yandex:', [/(disk\.)?yandex\.[a-z]+/]],
+  ['Cyberfile:', [/!!https:\/\/cyberfile.(su|me)\/\w+(\/)?(?=")/, /cyberfile.(su|me)\/folder\//]],
+  ['Cyberdrop:', [/fs-\d+\.cyberdrop\.[a-z]{2,}\/|cyberdrop\.[a-z]{2,}\/(f|e)\//, /cyberdrop\.[a-z]{2,}\/a\//]],
+  ['Pornhub:video', [/([~an@]+\.)?pornhub.com\/view_video/]],
+  ['Noodlemagazine:video', [/(adult.)?noodlemagazine.com\/watch\//]],
+  ['Spankbang:video', [/spankbang.com\/.*?\/video/]],
 ];
 
 /**

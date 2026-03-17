@@ -1428,17 +1428,55 @@ const ui = {
    * @returns {*}
    */
   tooltip: (target, content, options = {}) => {
-    // noinspection JSUnusedGlobalSymbols
-    return tippy(target, {
-      arrow: true,
-      theme: 'transparent',
-      allowHTML: true,
-      content: content,
-      appendTo: () => document.body || document.documentElement,
-      placement: 'left',
-      interactive: true,
-      ...options,
-    });
+    const isElement = value => value && value.nodeType === 1;
+    const isLiveElement = value => isElement(value) && !!value.isConnected;
+
+    let resolvedTarget = null;
+
+    if (typeof target === 'string') {
+      const matchedTargets = [...document.querySelectorAll(target)].filter(isLiveElement);
+      if (!matchedTargets.length) {
+        return null;
+      }
+
+      resolvedTarget = matchedTargets.length === 1 ? matchedTargets[0] : matchedTargets;
+    } else if (isElement(target)) {
+      if (!isLiveElement(target)) {
+        return null;
+      }
+
+      resolvedTarget = target;
+    } else if (target && typeof target.length === 'number') {
+      const matchedTargets = [...target].filter(isLiveElement);
+      if (!matchedTargets.length) {
+        return null;
+      }
+
+      resolvedTarget = matchedTargets.length === 1 ? matchedTargets[0] : matchedTargets;
+    } else {
+      return null;
+    }
+
+    const appendTarget = document.body || document.documentElement;
+    if (!appendTarget) {
+      return null;
+    }
+
+    try {
+      return tippy(resolvedTarget, {
+        arrow: true,
+        theme: 'transparent',
+        allowHTML: true,
+        content: content,
+        appendTo: appendTarget,
+        placement: 'left',
+        interactive: true,
+        ...options,
+      });
+    } catch (e) {
+      console.warn('XFPD: tooltip init skipped.', e);
+      return null;
+    }
   },
   pBars: {
     /**

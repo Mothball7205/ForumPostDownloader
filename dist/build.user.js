@@ -147,124 +147,124 @@ window.isFF = typeof InstallTrigger !== 'undefined';
 window.logs = [];
 
 const log = {
-    /**
+  /**
    * @returns {number}
    */
-    separator: postId => window.logs.push({ postId, message: '-'.repeat(175) }),
-    /**
+  separator: postId => window.logs.push({ postId, message: '-'.repeat(175) }),
+  /**
    * @param postId
    * @param str
    * @param type
    * @param toConsole
    */
-    write: (postId, str, type, toConsole = true) => {
-        const date = new Date();
-        const message = `[${date.toDateString()} ${date.toLocaleTimeString()}] [${type}] ${str}`
-        .replace(/(::.*?::)/gi, (match, g) => g.toUpperCase())
-        .replace(/::/g, '');
-        window.logs.push({ postId, message });
-        if (toConsole) {
-            if (type.toLowerCase() === 'info') {
-                console.info(message);
-            } else if (type.toLowerCase() === 'warn') {
-                console.warn(message);
-            } else {
-                console.error(message);
-            }
-        }
-    },
-    /**
+  write: (postId, str, type, toConsole = true) => {
+    const date = new Date();
+    const message = `[${date.toDateString()} ${date.toLocaleTimeString()}] [${type}] ${str}`
+      .replace(/(::.*?::)/gi, (match, g) => g.toUpperCase())
+      .replace(/::/g, '');
+    window.logs.push({ postId, message });
+    if (toConsole) {
+      if (type.toLowerCase() === 'info') {
+        console.info(message);
+      } else if (type.toLowerCase() === 'warn') {
+        console.warn(message);
+      } else {
+        console.error(message);
+      }
+    }
+  },
+  /**
    * @param postId
    * @param str
    * @param scope
    */
-    info: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'INFO'),
-    /**
+  info: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'INFO'),
+  /**
    * @param postId
    * @param str
    * @param scope
    */
-    warn: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'WARNING'),
-    /**
+  warn: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'WARNING'),
+  /**
    * @param postId
    * @param str
    * @param scope
    */
-    error: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'ERROR'),
-    // TODO: Fix param orders for the methods: -.-
-    post: {
-        /**
+  error: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'ERROR'),
+  // TODO: Fix param orders for the methods: -.-
+  post: {
+    /**
      * @param postId
      * @param str
      * @param postNumber
      * @returns {*}
      */
-        info: (postId, str, postNumber) => log.info(postId, str, `POST #${postNumber}`),
-        /**
+    info: (postId, str, postNumber) => log.info(postId, str, `POST #${postNumber}`),
+    /**
      * @param postId
      * @param str
      * @param postNumber
      * @returns {*}
      */
-        error: (postId, str, postNumber) => log.error(postId, str, `POST #${postNumber}`),
-    },
-    host: {
-        /**
+    error: (postId, str, postNumber) => log.error(postId, str, `POST #${postNumber}`),
+  },
+  host: {
+    /**
      * @param postId
      * @param str
      * @param host
      * @returns {*}
      */
-        info: (postId, str, host) => log.info(postId, str, host),
-        /**
+    info: (postId, str, host) => log.info(postId, str, host),
+    /**
      * @param postId
      * @param str
      * @param host
      * @returns {*}
      */
-        error: (postId, str, host) => log.error(postId, str, host),
-    },
+    error: (postId, str, host) => log.error(postId, str, host),
+  },
 };
 
 const settings = {
-    naming: {
-        allowEmojis: false,
-        invalidCharSubstitute: '-',
+  naming: {
+    allowEmojis: false,
+    invalidCharSubstitute: '-',
+  },
+  hosts: {
+    goFile: {
+      token: '',
     },
-    hosts: {
-        goFile: {
-            token: '',
-        },
+  },
+  ui: {
+    checkboxes: {
+      toggleAllCheckboxLabel: '',
     },
-    ui: {
-        checkboxes: {
-            toggleAllCheckboxLabel: '',
-        },
-    },
-    extensions: {
-        documents: ['.txt', '.doc', '.docx', '.pdf'],
-        compressed: ['.zip', '.rar', '.7z', '.tar', '.bz2', '.gzip'],
-        image: ['.jpg', '.jpeg', '.png', '.gif', '.gif', '.webp', '.jpe', '.svg', '.tif', '.tiff', '.jif'],
-        video: [
-            '.mpeg',
-            '.avchd',
-            '.webm',
-            '.mpv',
-            '.swf',
-            '.avi',
-            '.m4p',
-            '.wmv',
-            '.mp2',
-            '.m4v',
-            '.qt',
-            '.mpe',
-            '.mp4',
-            '.flv',
-            '.mov',
-            '.mpg',
-            '.ogg',
-        ],
-    },
+  },
+  extensions: {
+    documents: ['.txt', '.doc', '.docx', '.pdf'],
+    compressed: ['.zip', '.rar', '.7z', '.tar', '.bz2', '.gzip'],
+    image: ['.jpg', '.jpeg', '.png', '.gif', '.gif', '.webp', '.jpe', '.svg', '.tif', '.tiff', '.jif'],
+    video: [
+      '.mpeg',
+      '.avchd',
+      '.webm',
+      '.mpv',
+      '.swf',
+      '.avi',
+      '.m4p',
+      '.wmv',
+      '.mp2',
+      '.m4v',
+      '.qt',
+      '.mpe',
+      '.mp4',
+      '.flv',
+      '.mov',
+      '.mpg',
+      '.ogg',
+    ],
+  },
 };
 
 // GoFile filename hints (from API) so we don't rely on URL-encoded path segments
@@ -285,31 +285,31 @@ const filesterRefByUrl = new Map();
 
 // Filester: cache candidate fallback (some tokens are served from different cacheN hosts; cache6 is common but not guaranteed)
 const filesterCandidatesByToken = new Map(); // token -> string[]
-const filesterTriedByToken = new Map();      // token -> Set<string> of tried candidate URLs
+const filesterTriedByToken = new Map(); // token -> Set<string> of tried candidate URLs
 const filester429AttemptsByKey = new Map(); // token/url -> number of 429 retries (rate limiting)
 const filesterRetryAttemptsByKey = new Map(); // token/url -> number of retries on transient HTTP errors (429/400/etc)
 
-
 function filesterTokenFromVUrl(u) {
-    try {
-        const m = /\/v\/([^\/?#]+)/i.exec(String(u || ''));
-        return m && m[1] ? String(m[1]) : '';
-    } catch (e) { return ''; }
+  try {
+    const m = /\/v\/([^\/?#]+)/i.exec(String(u || ''));
+    return m && m[1] ? String(m[1]) : '';
+  } catch (e) {
+    return '';
+  }
 }
 
 function filesterBuildCandidates(token) {
-    const t = String(token || '').trim();
-    if (!t) return [];
-    const order = [6, 1, 2, 3, 4, 5, 7, 8];
-    const out = [];
-    for (const n of order) out.push(`https://cache${n}.filester.me/v/${t}`);
-    out.push(`https://filester.me/v/${t}`);
-    return out;
+  const t = String(token || '').trim();
+  if (!t) return [];
+  const order = [6, 1, 2, 3, 4, 5, 7, 8];
+  const out = [];
+  for (const n of order) out.push(`https://cache${n}.filester.me/v/${t}`);
+  out.push(`https://filester.me/v/${t}`);
+  return out;
 }
 
 // Bunkr filename hints (from /v/ pages)
 const bunkrNameByUrl = new Map();
-
 
 // Bunkr/Cloudflare: best-effort warm-up to let the browser complete a JS-only CF interstitial ("Just a moment...").
 // NOTE: This does NOT solve interactive Turnstile/CAPTCHA challenges; in that case you still need to do it manually.
@@ -319,7 +319,6 @@ const BUNKR_CF_WARMUP_ACTIVE_TAB = false;
 
 const BUNKR_CF_WARMUP_COOLDOWN_MS = 15000; // reduce repeated warm-up tabs
 
-
 // Bunkr fast-fail + domain blacklist:
 // - On first 403 or obvious CF interstitial on a non-last domain, immediately switch to next domain (no extra retries).
 // - Blacklist the failing domain for a while so subsequent links skip it entirely.
@@ -328,147 +327,150 @@ const BUNKR_DOMAIN_BLACKLIST_MS = 60 * 60 * 1000; // 60 minutes
 const xfpdBunkrDomainBanUntil = new Map(); // baseOrigin -> timestamp
 
 function xfpdBunkrNormalizeBase(baseOrUrl) {
-    try {
-        const u = new URL(String(baseOrUrl || ''));
-        return u.origin;
-    } catch (e) {
-        return String(baseOrUrl || '').replace(/\/+$/, '');
-    }
+  try {
+    const u = new URL(String(baseOrUrl || ''));
+    return u.origin;
+  } catch (e) {
+    return String(baseOrUrl || '').replace(/\/+$/, '');
+  }
 }
 
 function xfpdBunkrIsBaseBanned(baseOrUrl) {
-    try {
-        const base = xfpdBunkrNormalizeBase(baseOrUrl);
-        const until = xfpdBunkrDomainBanUntil.get(base);
-        if (!until) return false;
-        if (Date.now() >= until) {
-            xfpdBunkrDomainBanUntil.delete(base);
-            return false;
-        }
-        return true;
-    } catch (e) {
-        return false;
+  try {
+    const base = xfpdBunkrNormalizeBase(baseOrUrl);
+    const until = xfpdBunkrDomainBanUntil.get(base);
+    if (!until) return false;
+    if (Date.now() >= until) {
+      xfpdBunkrDomainBanUntil.delete(base);
+      return false;
     }
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 function xfpdBunkrBanBase(baseOrUrl) {
-    try {
-        const base = xfpdBunkrNormalizeBase(baseOrUrl);
-        // Don't blacklist the last-resort domain (it may be the only thing left).
-        if (base === 'https://bunkr.cr') return;
-        xfpdBunkrDomainBanUntil.set(base, Date.now() + BUNKR_DOMAIN_BLACKLIST_MS);
-    } catch (e) {}
+  try {
+    const base = xfpdBunkrNormalizeBase(baseOrUrl);
+    // Don't blacklist the last-resort domain (it may be the only thing left).
+    if (base === 'https://bunkr.cr') return;
+    xfpdBunkrDomainBanUntil.set(base, Date.now() + BUNKR_DOMAIN_BLACKLIST_MS);
+  } catch (e) {}
 }
 
 function xfpdBunkrFilterBases(bases) {
-    const uniq = [];
-    const seen = new Set();
-    for (const b of (bases || [])) {
-        const base = xfpdBunkrNormalizeBase(b);
-        if (!base || seen.has(base)) continue;
-        seen.add(base);
-        uniq.push(base);
-    }
-    const filtered = uniq.filter(b => b === 'https://bunkr.cr' || !xfpdBunkrIsBaseBanned(b));
-    // Never return an empty list; keep last-resort behavior intact.
-    return filtered.length ? filtered : uniq;
+  const uniq = [];
+  const seen = new Set();
+  for (const b of bases || []) {
+    const base = xfpdBunkrNormalizeBase(b);
+    if (!base || seen.has(base)) continue;
+    seen.add(base);
+    uniq.push(base);
+  }
+  const filtered = uniq.filter(b => b === 'https://bunkr.cr' || !xfpdBunkrIsBaseBanned(b));
+  // Never return an empty list; keep last-resort behavior intact.
+  return filtered.length ? filtered : uniq;
 }
 
 function xfpdLooksLikeCfChallenge(source, dom) {
-    try {
-        const s = String(source || '');
-        const head = s.slice(0, 8000).toLowerCase();
+  try {
+    const s = String(source || '');
+    const head = s.slice(0, 8000).toLowerCase();
 
-        const title =
-            String(dom?.querySelector?.('title')?.textContent || '').trim();
+    const title = String(dom?.querySelector?.('title')?.textContent || '').trim();
 
-        if (title && /just a moment|attention required|checking your browser/i.test(title)) return true;
-        if (title && /cloudflare/i.test(title)) return true;
+    if (title && /just a moment|attention required|checking your browser/i.test(title)) return true;
+    if (title && /cloudflare/i.test(title)) return true;
 
-        if (head.includes('cdn-cgi/challenge-platform')) return true;
-        if (head.includes('challenges.cloudflare.com')) return true;
-        if (head.includes('cf-browser-verification')) return true;
-        if (head.includes('checking your browser')) return true;
-        if (head.includes('just a moment')) return true;
-        if (head.includes('attention required')) return true;
+    if (head.includes('cdn-cgi/challenge-platform')) return true;
+    if (head.includes('challenges.cloudflare.com')) return true;
+    if (head.includes('cf-browser-verification')) return true;
+    if (head.includes('checking your browser')) return true;
+    if (head.includes('just a moment')) return true;
+    if (head.includes('attention required')) return true;
 
-        // DOM markers (when we have it)
-        if (dom?.querySelector?.('#cf-challenge-running, #challenge-form, .cf-browser-verification, .cf-challenge')) return true;
-    } catch (e) {}
-    return false;
+    // DOM markers (when we have it)
+    if (dom?.querySelector?.('#cf-challenge-running, #challenge-form, .cf-browser-verification, .cf-challenge')) return true;
+  } catch (e) {}
+  return false;
 }
 
 function xfpdLooksLikeCfFilenameHint(name) {
-    const n = String(name || '').trim();
-    return /^(?:just a moment\.{0,3}|checking your browser\.{0,3}|attention required\.{0,3})$/i.test(n) || /cloudflare/i.test(n);
+  const n = String(name || '').trim();
+  return /^(?:just a moment\.{0,3}|checking your browser\.{0,3}|attention required\.{0,3})$/i.test(n) || /cloudflare/i.test(n);
 }
-
 
 // Try to extract the original filename from Bunkr /api/vs JSON (when /v/ is blocked by CF/403).
 function xfpdBunkrExtractNameFromVsData(data) {
-    try {
-        const cands = [];
-        const add = (v) => {
-            if (!v) return;
-            if (typeof v === 'string') cands.push(v);
-            else if (typeof v === 'number') cands.push(String(v));
-        };
+  try {
+    const cands = [];
+    const add = v => {
+      if (!v) return;
+      if (typeof v === 'string') cands.push(v);
+      else if (typeof v === 'number') cands.push(String(v));
+    };
 
-        add(data?.name);
-        add(data?.filename);
-        add(data?.file_name);
-        add(data?.original);
-        add(data?.title);
+    add(data?.name);
+    add(data?.filename);
+    add(data?.file_name);
+    add(data?.original);
+    add(data?.title);
 
-        // common nesting patterns
-        if (data?.data && typeof data.data === 'object') {
-            add(data.data.name);
-            add(data.data.filename);
-            add(data.data.file_name);
-            add(data.data.original);
-            add(data.data.title);
-        }
-        if (data?.file && typeof data.file === 'object') {
-            add(data.file.name);
-            add(data.file.filename);
-            add(data.file.original);
-            add(data.file.title);
-        }
+    // common nesting patterns
+    if (data?.data && typeof data.data === 'object') {
+      add(data.data.name);
+      add(data.data.filename);
+      add(data.data.file_name);
+      add(data.data.original);
+      add(data.data.title);
+    }
+    if (data?.file && typeof data.file === 'object') {
+      add(data.file.name);
+      add(data.file.filename);
+      add(data.file.original);
+      add(data.file.title);
+    }
 
-        const norm = (s) => {
-            let t = String(s || '').replace(/\s+/g, ' ').trim();
-            t = t.replace(/\s*\|\s*Bunkr\s*$/i, '').trim();
-            return t;
-        };
+    const norm = s => {
+      let t = String(s || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      t = t.replace(/\s*\|\s*Bunkr\s*$/i, '').trim();
+      return t;
+    };
 
-        // Prefer candidates that look like a real filename with an extension.
-        for (const raw of cands) {
-            const t = norm(raw);
-            if (!t) continue;
-            if (xfpdLooksLikeCfFilenameHint(t)) continue;
-            if (/\.[A-Za-z0-9]{1,8}$/.test(t)) return t;
-        }
-        // Otherwise, return the first non-empty non-CF string.
-        for (const raw of cands) {
-            const t = norm(raw);
-            if (!t) continue;
-            if (xfpdLooksLikeCfFilenameHint(t)) continue;
-            return t;
-        }
-    } catch (e) {}
-    return '';
+    // Prefer candidates that look like a real filename with an extension.
+    for (const raw of cands) {
+      const t = norm(raw);
+      if (!t) continue;
+      if (xfpdLooksLikeCfFilenameHint(t)) continue;
+      if (/\.[A-Za-z0-9]{1,8}$/.test(t)) return t;
+    }
+    // Otherwise, return the first non-empty non-CF string.
+    for (const raw of cands) {
+      const t = norm(raw);
+      if (!t) continue;
+      if (xfpdLooksLikeCfFilenameHint(t)) continue;
+      return t;
+    }
+  } catch (e) {}
+  return '';
 }
 
-
 async function xfpdWarmupTab(url, ms = BUNKR_CF_WARMUP_MS, active = BUNKR_CF_WARMUP_ACTIVE_TAB) {
+  try {
+    const tab = GM_openInTab(url, { active: !!active, insert: true, setParent: true });
+    await h.delayedResolve(ms);
     try {
-        const tab = GM_openInTab(url, { active: !!active, insert: true, setParent: true });
-        await h.delayedResolve(ms);
-        try { tab?.close?.(); } catch (e) {}
-    } catch (e) {
-        // Ignore - warm-up is best-effort
-        try { await h.delayedResolve(ms); } catch (e2) {}
-    }
+      tab?.close?.();
+    } catch (e) {}
+  } catch (e) {
+    // Ignore - warm-up is best-effort
+    try {
+      await h.delayedResolve(ms);
+    } catch (e2) {}
+  }
 }
 
 let xfpdBunkrCfWarmupPromise = null;
@@ -1499,38 +1501,38 @@ const ui = {
             </label>
           </div>
           `;
-        },
-        /**
+    },
+    /**
      * @param content
      * @returns {string}
      */
-        createRow: content => {
-            return `
+    createRow: content => {
+      return `
       <div class="menu-row">
           ${content}
       </div>
       `;
-        },
-        /**
+    },
+    /**
      * @param label
      * @returns {string}
      */
-        createLabel: label => {
-            return `
+    createLabel: label => {
+      return `
       <div style="font-weight: bold; margin-top:5px; margin-bottom: 8px; color: #3DB7C7;">
           ${label}
       </div>
       `;
-        },
-        config: {
-            page: {
-                /**
+    },
+    config: {
+      page: {
+        /**
          * @param backgroundColor
          * @param innerHTML
          * @returns {string}
          */
-                createForm: (backgroundColor, innerHTML) => {
-                    return `
+        createForm: (backgroundColor, innerHTML) => {
+          return `
           <form
             id="downloader-page-config-form"
             class="menu-content"
@@ -1539,17 +1541,17 @@ const ui = {
             ${innerHTML}
           </form>
           `;
-                },
-            },
-            post: {
-                /**
+        },
+      },
+      post: {
+        /**
          * @param postId
          * @param backgroundColor
          * @param innerHTML
          * @returns {string}
          */
-                createForm: (postId, backgroundColor, innerHTML) => {
-                    return `
+        createForm: (postId, backgroundColor, innerHTML) => {
+          return `
           <form
             id="download-config-form-${postId}"
             class="menu-content"
@@ -1558,16 +1560,16 @@ const ui = {
             ${innerHTML}
           </form>
           `;
-                },
-                /**
+        },
+        /**
          * @param currentValue
          * @param postId
          * @param backgroundColor
          * @param placeholder
          * @returns {string}
          */
-                createFilenameInput: (currentValue, postId, backgroundColor, placeholder) => {
-                    return `
+        createFilenameInput: (currentValue, postId, backgroundColor, placeholder) => {
+          return `
           <div class="menu-row">
             <div style="font-weight: bold; margin-top:5px; margin-bottom: 8px; color: #3DB7C7;">
                 File / Archive Name
@@ -1585,97 +1587,97 @@ const ui = {
             />
           </div>
           `;
-                },
-                /**
+        },
+        /**
          * @returns {string}
          */
-                createZippedCheckbox: (postId, checked) => {
-                    return ui.forms.createCheckbox(`settings-${postId}-zipped`, 'Zipped', checked);
-                },
-                /**
+        createZippedCheckbox: (postId, checked) => {
+          return ui.forms.createCheckbox(`settings-${postId}-zipped`, 'Zipped', checked);
+        },
+        /**
          * @returns {string}
          */
-                /**
+        /**
          * @returns {string}
          */
-                createFlattenCheckbox: (postId, checked) => {
-                    return ui.forms.createCheckbox(`settings-${postId}-flatten`, 'Flatten', checked);
-                },
-                /**
+        createFlattenCheckbox: (postId, checked) => {
+          return ui.forms.createCheckbox(`settings-${postId}-flatten`, 'Flatten', checked);
+        },
+        /**
          * @returns {string}
          */
-                createSkipDownloadCheckbox: (postId, checked) => {
-                    return ui.forms.createCheckbox(`settings-${postId}-skip-download`, 'Skip Download', checked);
-                },
-                /**
+        createSkipDownloadCheckbox: (postId, checked) => {
+          return ui.forms.createCheckbox(`settings-${postId}-skip-download`, 'Skip Download', checked);
+        },
+        /**
          * @returns {string}
          */
-                createVerifyBunkrLinksCheckbox: (postId, checked) => {
-                    return ui.forms.createCheckbox(`settings-${postId}-verify-bunkr-links`, 'Verify Bunkr Links', checked);
-                },
-                /**
+        createVerifyBunkrLinksCheckbox: (postId, checked) => {
+          return ui.forms.createCheckbox(`settings-${postId}-verify-bunkr-links`, 'Verify Bunkr Links', checked);
+        },
+        /**
          * @returns {string}
          */
-                createGenerateLinksCheckbox: (postId, checked) => {
-                    return ui.forms.createCheckbox(`settings-${postId}-generate-links`, 'Generate Links', checked);
-                },
-                /**
+        createGenerateLinksCheckbox: (postId, checked) => {
+          return ui.forms.createCheckbox(`settings-${postId}-generate-links`, 'Generate Links', checked);
+        },
+        /**
          * @returns {string}
          */
-                createGenerateLogCheckbox: (postId, checked) => {
-                    return ui.forms.createCheckbox(`settings-${postId}-generate-log`, 'Generate Log', checked);
-                },
-                /**
+        createGenerateLogCheckbox: (postId, checked) => {
+          return ui.forms.createCheckbox(`settings-${postId}-generate-log`, 'Generate Log', checked);
+        },
+        /**
          * @returns {string}
          */
-                createSkipDuplicatesCheckbox: (postId, checked) => {
-                    return ui.forms.createCheckbox(`settings-${postId}-skip-duplicates`, 'Skip Duplicates', checked);
-                },
-                /**
+        createSkipDuplicatesCheckbox: (postId, checked) => {
+          return ui.forms.createCheckbox(`settings-${postId}-skip-duplicates`, 'Skip Duplicates', checked);
+        },
+        /**
          * @param hosts
          * @param getTotalDownloadableResourcesCB
          * @returns {string}
          */
-                createFilterLabel: (hosts, getTotalDownloadableResourcesCB) => {
-                    return `
+        createFilterLabel: (hosts, getTotalDownloadableResourcesCB) => {
+          return `
           <div style="font-weight: bold; margin-top:5px; margin-bottom: 8px; margin-left: 8px; color: #3DB7C7;">Filter <span id="filtered-count">(${getTotalDownloadableResourcesCB(
-                        hosts,
-                    )})</span></div>
+            hosts,
+          )})</span></div>
           `;
-                },
-                /**
+        },
+        /**
          * @param postId
          * @returns {string}
          */
-                createToggleAllCheckbox: postId => {
-                    return ui.forms.createCheckbox(`settings-toggle-all-hosts-${postId}`, settings.ui.checkboxes.toggleAllCheckboxLabel, true);
-                },
-                /**
+        createToggleAllCheckbox: postId => {
+          return ui.forms.createCheckbox(`settings-toggle-all-hosts-${postId}`, settings.ui.checkboxes.toggleAllCheckboxLabel, true);
+        },
+        /**
          * @param postId
          * @param host
          * @returns {string}
          */
-                createHostCheckbox: (postId, host) => {
-                    const title = `${host.name} ${host.category}`;
-                    return ui.forms.createCheckbox(`downloader-host-${host.id}-${postId}`, `${title} (${host.resources.length})`, host.enabled);
-                },
-                /**
+        createHostCheckbox: (postId, host) => {
+          const title = `${host.name} ${host.category}`;
+          return ui.forms.createCheckbox(`downloader-host-${host.id}-${postId}`, `${title} (${host.resources.length})`, host.enabled);
+        },
+        /**
          * @param postId
          * @param filterLabel
          * @param hostsHtml
          * @param createToggleAllCheckbox
          * @returns {string}
          */
-                createHostCheckboxes: (postId, filterLabel, hostsHtml, createToggleAllCheckbox) => {
-                    return `
+        createHostCheckboxes: (postId, filterLabel, hostsHtml, createToggleAllCheckbox) => {
+          return `
           <div>
             ${filterLabel}
             ${createToggleAllCheckbox ? ui.forms.config.post.createToggleAllCheckbox(postId) : ''}
             ${hostsHtml}
           </div>
           `;
-                },
-                /**
+        },
+        /**
          * @param parsedPost
          * @param parsedHosts
          * @param defaultFilename
@@ -1684,27 +1686,27 @@ const ui = {
          * @param totalDownloadableResourcesForPostCB
          * @param btnDownloadPost
          */
-                createPostConfigForm: (
-                    parsedPost,
-                    parsedHosts,
-                    defaultFilename,
-                    settings,
-                    onSubmitFormCB,
-                    totalDownloadableResourcesForPostCB,
-                    btnDownloadPost,
-                ) => {
-                    const { postId } = parsedPost;
-                    const color = ui.getTooltipBackgroundColor();
+        createPostConfigForm: (
+          parsedPost,
+          parsedHosts,
+          defaultFilename,
+          settings,
+          onSubmitFormCB,
+          totalDownloadableResourcesForPostCB,
+          btnDownloadPost,
+        ) => {
+          const { postId } = parsedPost;
+          const color = ui.getTooltipBackgroundColor();
 
-                    const customFilename = settings.output.find(o => o.postId === postId)?.value || '';
+          const customFilename = settings.output.find(o => o.postId === postId)?.value || '';
 
-                    let hostsHtml = '<div>';
-                    parsedHosts.forEach(host => (hostsHtml += ui.forms.config.post.createHostCheckbox(postId, host)));
-                    hostsHtml += '</div>';
+          let hostsHtml = '<div>';
+          parsedHosts.forEach(host => (hostsHtml += ui.forms.config.post.createHostCheckbox(postId, host)));
+          hostsHtml += '</div>';
 
-                    const filterLabel = ui.forms.config.post.createFilterLabel(parsedHosts, totalDownloadableResourcesForPostCB);
+          const filterLabel = ui.forms.config.post.createFilterLabel(parsedHosts, totalDownloadableResourcesForPostCB);
 
-                    const settingsHeading = `
+          const settingsHeading = `
           <div class="menu-row">
             <div style="font-weight: bold; margin-top:3px; margin-bottom: 4px; color: #3DB7C7;">
                 Settings

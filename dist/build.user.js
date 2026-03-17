@@ -8615,7 +8615,7 @@ const selectedPosts = [];
         });
 
       html = `${ui.forms.createRow(ui.forms.createLabel('Post Selection'))} ${html}`;
-      ui.tooltip(btnDownloadPage, ui.forms.config.page.createForm(color, html), {
+      const pageConfigTooltip = ui.tooltip(btnDownloadPage, ui.forms.config.page.createForm(color, html), {
         placement: 'bottom',
         interactive: true,
         onShown: () => {
@@ -8676,6 +8676,10 @@ const selectedPosts = [];
             });
         },
       });
+
+      if (!pageConfigTooltip) {
+        console.warn('XFPD: page config tooltip init skipped.');
+      }
     }
   };
 

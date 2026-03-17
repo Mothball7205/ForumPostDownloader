@@ -122,22 +122,28 @@
 // ==/UserScript==
 // --- tab handle helper (Tampermonkey can return either a Tab object or a Promise<Tab>) ---
 function xfpdCloseTabHandle(tabOrPromise) {
-    try {
-        if (!tabOrPromise) return;
-        // Promise-like (e.g., some GM implementations return Promise<Tab>)
-        if (typeof tabOrPromise.then === 'function') {
+  try {
+    if (!tabOrPromise) return;
+    // Promise-like (e.g., some GM implementations return Promise<Tab>)
+    if (typeof tabOrPromise.then === 'function') {
+      try {
+        tabOrPromise
+          .then(t => {
             try {
-                tabOrPromise.then(t => {
-                    try { if (t && typeof t.close === 'function') t.close(); } catch (e) {}
-                }).catch(() => {});
+              if (t && typeof t.close === 'function') t.close();
             } catch (e) {}
-            return;
-        }
-        // Direct tab handle
-        if (typeof tabOrPromise.close === 'function') {
-            try { tabOrPromise.close(); } catch (e) {}
-        }
-    } catch (e) {}
+          })
+          .catch(() => {});
+      } catch (e) {}
+      return;
+    }
+    // Direct tab handle
+    if (typeof tabOrPromise.close === 'function') {
+      try {
+        tabOrPromise.close();
+      } catch (e) {}
+    }
+  } catch (e) {}
 }
 // ---------------------------------------------------------------------------
 const JSZip = window.JSZip;

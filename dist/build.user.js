@@ -1838,7 +1838,7 @@ const ui = {
 
           const configForm = ui.forms.config.post.createForm(postId, color, formHtml.join(''));
 
-          ui.tooltip(btnDownloadPost, configForm, {
+          const postConfigTooltip = ui.tooltip(btnDownloadPost, configForm, {
             onShown: instance => {
               const inputEl = h.element(`#filename-input-${postId}`);
               if (inputEl) {
@@ -1986,6 +1986,12 @@ const ui = {
               });
             },
           });
+
+          if (!postConfigTooltip) {
+            console.warn(`XFPD: post config tooltip init skipped for post ${postId}.`);
+          }
+
+          return postConfigTooltip;
         },
       },
     },

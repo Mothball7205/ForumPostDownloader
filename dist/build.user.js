@@ -8623,13 +8623,23 @@ const selectedPosts = [];
             .filter(p => p.parsedHosts.length)
             .forEach(post => {
               const { postId, contentContainer } = post.parsedPost;
-              ui.tooltip(
-                `#post-content-${postId}`,
-                `<div style="overflow-y: auto; background: #242323; padding: 16px; width: 500px; max-height: 500px">
+              const previewAnchor = document.querySelector(`#post-content-${postId}`);
+              if (previewAnchor && !previewAnchor.dataset.xfpdPreviewTooltipBound) {
+                previewAnchor.dataset.xfpdPreviewTooltipBound = '1';
+                setTimeout(() => {
+                  if (!previewAnchor.isConnected) {
+                    return;
+                  }
+
+                  ui.tooltip(
+                    previewAnchor,
+                    `<div style="overflow-y: auto; background: #242323; padding: 16px; width: 500px; max-height: 500px">
                           ${contentContainer.innerHTML}
                          </div>`,
-                { placement: 'right', offset: [10, 15] },
-              );
+                    { placement: 'right', offset: [10, 15] },
+                  );
+                }, 0);
+              }
 
               const postCheckbox = document.querySelector(`#config-download-post-${postId}`);
               if (postCheckbox && !postCheckbox.dataset.xfpdBound) {

@@ -1,19 +1,6 @@
 const fs = require('fs');
-
-const getContents = path => require('child_process').execSync(`cat ${path}`).toString();
-
-const header = getContents('./src/header.js');
-
-// The inclusion order is important.
-const includes = ['globals.js', 'logging.js', 'settings.js', 'helpers.js', 'prototypes.js', 'parsers.js', 'styles.js', 'ui.js', 'init.js']
-  .map(fn => getContents(`./src/includes/${fn}`))
-  .join('\n');
-const main = getContents('./src/main.js');
-
-if (!fs.existsSync('./dist')) {
-  fs.mkdirSync('./dist');
-}
-
-const data = header + includes + main;
-
-fs.writeFileSync('dist/build.user.js', data);
+const path = require('path');
+const FILES = ['header.js','globals.js','host-caches.js','bunkr.js','helpers.js','prototypes.js','parsers.js','styles.js','ui.js','init.js','hosts.js','turbo.js','resolvers.js','download.js','post-actions.js','main.js'];
+const out = FILES.map(f => fs.readFileSync(path.join('src', f), 'utf8')).join('\n') + '\n';
+fs.mkdirSync('dist', { recursive: true });
+fs.writeFileSync('dist/build.user.js', out);

@@ -5856,9 +5856,9 @@ const resolvers = [
 // Pure helpers extracted from download.js. No DOM/GM_* access, so they're unit-testable in isolation.
 const WIN_ILLEGAL_RE = /[<>:"\/\\|?*\x00-\x1F]/g;
 
-const sanitizeWinSegment = (s, naming) => {
-  const sub = naming && naming.invalidCharSubstitute ? naming.invalidCharSubstitute : '_';
-  let out = String(s || '');
+const sanitizeWinSegment = (s, naming, fallback = '_') => {
+  const sub = naming?.invalidCharSubstitute ?? '-';
+  let out = String(s ?? '').trim();
 
   // If emojis are disabled, strip emoji/pictographs for consistent behavior across hosts.
   if (naming?.allowEmojis === false) {
@@ -5874,11 +5874,16 @@ const sanitizeWinSegment = (s, naming) => {
   out = out.replace(WIN_ILLEGAL_RE, sub);
   // Remove remaining control chars / oddities
   out = out.replace(/[\x00-\x08\x0E-\x1F\x7F]/g, '');
-  // Windows also hates trailing dots/spaces in path segments
-  out = out.replace(/[\. ]+$/g, '').replace(/^[\. ]+/g, '');
-  if (!out) out = '_';
+  // Windows also hates leading/trailing dots/spaces in path segments
+  out = out
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[. ]+|[. ]+$/g, '');
+  if (!out) out = String(fallback || '_');
   // Avoid reserved device names
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(out)) out = '_' + out;
+  // Very long segments can cause path issues; keep it reasonable.
+  if (out.length > 180) out = out.slice(0, 180).trim();
   return out;
 };
 
@@ -5887,37 +5892,6 @@ const sanitizeWinPath = (p, naming) => {
     .split('/')
     .map(s => sanitizeWinSegment(s, naming))
     .join('/');
-};
-
-// Lenient variant used for the ZIP/archive title (kept separate from sanitizeWinSegment on purpose:
-// both are in use in download.js and they differ in defaults/whitespace handling).
-const sanitizeZipTitleSegment = (seg, naming, fallback = 'file') => {
-  let s = String(seg ?? '').trim();
-
-  if (naming?.allowEmojis === false) {
-    try {
-      s = s.replace(/\p{Extended_Pictographic}/gu, '');
-    } catch (e) {
-      s = s.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '');
-    }
-    s = s.replace(/[\uFE0E\uFE0F\u200D]/g, '');
-  }
-
-  const sub = naming?.invalidCharSubstitute ?? '-';
-  s = s
-    .replace(/[\u0000-\u001f\u007f]/g, '')
-    .replace(/[<>:"/\\|?*]/g, sub)
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[. ]+$/g, '');
-
-  if (!s) s = String(fallback || 'file');
-
-  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(s)) s = `_${s}`;
-
-  if (s.length > 180) s = s.slice(0, 180).trim();
-
-  return s;
 };
 
 const ensureUniquePath = (path, usedPaths, { ext, fnNoExt }) => {
@@ -6081,7 +6055,6 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     sanitizeWinSegment,
     sanitizeWinPath,
-    sanitizeZipTitleSegment,
     ensureUniquePath,
     ensureUniqueFlatName,
     isGoFileUrl,
@@ -8319,7 +8292,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
   }
 
   if (totalDownloadable > 0) {
-    let title = sanitizeZipTitleSegment(threadTitle, settings?.naming);
+    let title = sanitizeWinSegment(threadTitle, settings?.naming);
 
     const mainZipName = customFilename || `${title} #${postNumber}.zip`;
     const generatedZipName = `${title} #${postNumber} generated.zip`;

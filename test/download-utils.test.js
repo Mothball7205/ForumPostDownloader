@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   sanitizeWinSegment,
   sanitizeWinPath,
-  sanitizeZipTitleSegment,
   ensureUniquePath,
   ensureUniqueFlatName,
   isGoFileUrl,
@@ -24,33 +23,41 @@ const ext = p => (!p || p.indexOf('.') < 0 ? null : p.split('.').reverse()[0]);
 const fnNoExt = p => p.trim().split('.').reverse().slice(1).reverse().join('.');
 const helpers = { ext, fnNoExt };
 
-describe('sanitizeWinSegment (strict per-file variant)', () => {
-  test('replaces windows-illegal chars with default _', () => {
-    expect(sanitizeWinSegment('a<b>c:d"e/f\\g|h?i*j', undefined)).toBe('a_b_c_d_e_f_g_h_i_j');
+describe('sanitizeWinSegment', () => {
+  test('replaces windows-illegal chars with default -', () => {
+    expect(sanitizeWinSegment('a<b>c:d"e/f\\g|h?i*j', undefined)).toBe('a-b-c-d-e-f-g-h-i-j');
   });
 
   test('uses invalidCharSubstitute when provided', () => {
-    expect(sanitizeWinSegment('a<b', { invalidCharSubstitute: '-' })).toBe('a-b');
+    expect(sanitizeWinSegment('a<b', { invalidCharSubstitute: '_' })).toBe('a_b');
   });
 
-  test('falls back to _ when substitute is falsy', () => {
-    expect(sanitizeWinSegment('a<b', { invalidCharSubstitute: '' })).toBe('a_b');
-    expect(sanitizeWinSegment('a<b', { invalidCharSubstitute: undefined })).toBe('a_b');
+  test('empty invalidCharSubstitute deletes the char', () => {
+    expect(sanitizeWinSegment('a<b', { invalidCharSubstitute: '' })).toBe('ab');
+  });
+
+  test('collapses whitespace runs to a single space', () => {
+    expect(sanitizeWinSegment('  a    b  ', undefined)).toBe('a b');
   });
 
   test('strips leading and trailing dots/spaces', () => {
     expect(sanitizeWinSegment('  ..name..  ', undefined)).toBe('name');
+    expect(sanitizeWinSegment('..a..', undefined)).toBe('a');
   });
 
   test('control chars are replaced like other illegal chars', () => {
     // \x00-\x1F are part of WIN_ILLEGAL_RE, so they become the substitute first.
-    expect(sanitizeWinSegment('a\x00b\x1Fc', undefined)).toBe('a_b_c');
+    expect(sanitizeWinSegment('a\x00b\x1Fc', undefined)).toBe('a-b-c');
   });
 
   test('defaults empty input to _', () => {
     expect(sanitizeWinSegment('', undefined)).toBe('_');
     expect(sanitizeWinSegment(null, undefined)).toBe('_');
     expect(sanitizeWinSegment('...', undefined)).toBe('_');
+  });
+
+  test('honors custom fallback', () => {
+    expect(sanitizeWinSegment('', undefined, 'file')).toBe('file');
   });
 
   test('prefixes reserved device names', () => {
@@ -68,47 +75,33 @@ describe('sanitizeWinSegment (strict per-file variant)', () => {
     expect(sanitizeWinSegment('a😀b', undefined)).toBe('a😀b');
     expect(sanitizeWinSegment('a😀b', { allowEmojis: true })).toBe('a😀b');
   });
+
+  test('caps length at 180', () => {
+    const long = 'x'.repeat(200);
+    expect(sanitizeWinSegment(long, undefined).length).toBe(180);
+  });
+
+  test('strips leading dots (hidden-file protection)', () => {
+    expect(sanitizeWinSegment('.hidden', undefined)).toBe('hidden');
+  });
+
+  test('empty input after stripping dots becomes fallback', () => {
+    expect(sanitizeWinSegment('.', undefined)).toBe('_');
+    expect(sanitizeWinSegment(' . ', undefined)).toBe('_');
+  });
 });
 
-describe('sanitizeWinPath (strict per-file variant)', () => {
+describe('sanitizeWinPath', () => {
   test('sanitizes each path segment', () => {
-    expect(sanitizeWinPath('a<b/c>d', undefined)).toBe('a_b/c_d');
+    expect(sanitizeWinPath('a<b/c>d', undefined)).toBe('a-b/c-d');
   });
 
   test('handles trailing slash (empty segment becomes _)', () => {
     expect(sanitizeWinPath('a/b/', undefined)).toBe('a/b/_');
   });
-});
 
-describe('sanitizeZipTitleSegment (lenient ZIP-title variant)', () => {
-  test('defaults substitute to -', () => {
-    expect(sanitizeZipTitleSegment('a<b', undefined)).toBe('a-b');
-  });
-
-  test('collapses whitespace runs to a single space', () => {
-    expect(sanitizeZipTitleSegment('  a    b  ', undefined)).toBe('a b');
-  });
-
-  test('trims trailing dots/spaces only', () => {
-    expect(sanitizeZipTitleSegment('..a.. ', undefined)).toBe('..a');
-  });
-
-  test('falls back to file for empty input', () => {
-    expect(sanitizeZipTitleSegment('', undefined)).toBe('file');
-    expect(sanitizeZipTitleSegment('   ', undefined)).toBe('file');
-  });
-
-  test('caps length at 180', () => {
-    const long = 'x'.repeat(200);
-    expect(sanitizeZipTitleSegment(long, undefined).length).toBe(180);
-  });
-
-  test('uses invalidCharSubstitute when provided', () => {
-    expect(sanitizeZipTitleSegment('a<b', { invalidCharSubstitute: '_' })).toBe('a_b');
-  });
-
-  test('strips emoji when allowEmojis is false', () => {
-    expect(sanitizeZipTitleSegment('a😀b', { allowEmojis: false })).toBe('ab');
+  test('collapses whitespace in segments', () => {
+    expect(sanitizeWinPath('a  b/c d', undefined)).toBe('a b/c d');
   });
 });
 

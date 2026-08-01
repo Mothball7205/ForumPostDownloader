@@ -2218,7 +2218,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
   }
 
   if (totalDownloadable > 0) {
-    let title = sanitizeZipTitleSegment(threadTitle, settings?.naming);
+    let title = sanitizeWinSegment(threadTitle, settings?.naming);
 
     const mainZipName = customFilename || `${title} #${postNumber}.zip`;
     const generatedZipName = `${title} #${postNumber} generated.zip`;

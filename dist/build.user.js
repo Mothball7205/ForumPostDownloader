@@ -4829,8 +4829,6 @@ resolvers.push([
       const resolved = [];
       const seen = new Set();
 
-      let firstDom = null;
-      let firstSource = '';
       let folderName = '';
 
       const MAX_PAGES = 500;
@@ -4863,38 +4861,28 @@ resolvers.push([
           };
 
           let t = '';
-
-          // DOM: og:title first
-          try {
-            t = pickClean(dom?.querySelector('meta[property="og:title"]')?.getAttribute('content') || '');
-          } catch (e) {}
-          try {
-            if (!t) t = pickClean(dom?.querySelector('meta[name="og:title"]')?.getAttribute('content') || '');
-          } catch (e) {}
-          try {
-            if (!t) t = pickClean(dom?.querySelector('title')?.textContent || '');
-          } catch (e) {}
+          for (const sel of ['meta[property="og:title"]', 'meta[name="og:title"]']) {
+            t = pickClean(dom?.querySelector(sel)?.getAttribute('content') || '');
+            if (t) break;
+          }
+          if (!t) t = pickClean(dom?.querySelector('title')?.textContent || '');
 
           // HTML fallback (order-independent meta parsing)
           if (isBad(t)) {
             const s = String(html || '');
             if (s) {
-              try {
-                const mTag =
-                  /<meta\b[^>]*\b(?:property|name)=["']og:title["'][^>]*>/i.exec(s) ||
-                  /<meta\b[^>]*\bcontent=["'][^"']+["'][^>]*\b(?:property|name)=["']og:title["'][^>]*>/i.exec(s);
-                if (mTag && mTag[0]) {
-                  const mC = /\bcontent=["']([^"']+)["']/i.exec(mTag[0]);
-                  if (mC && mC[1]) t = pickClean(mC[1]);
-                }
-              } catch (e) {}
+              const mTag =
+                /<meta\b[^>]*\b(?:property|name)=["']og:title["'][^>]*>/i.exec(s) ||
+                /<meta\b[^>]*\bcontent=["'][^"']+["'][^>]*\b(?:property|name)=["']og:title["'][^>]*>/i.exec(s);
+              if (mTag && mTag[0]) {
+                const mC = /\bcontent=["']([^"']+)["']/i.exec(mTag[0]);
+                if (mC && mC[1]) t = pickClean(mC[1]);
+              }
 
-              try {
-                if (isBad(t)) {
-                  const mT = /<title[^>]*>\s*([^<]+?)\s*<\/title>/i.exec(s);
-                  if (mT && mT[1]) t = pickClean(mT[1]);
-                }
-              } catch (e) {}
+              if (isBad(t)) {
+                const mT = /<title[^>]*>\s*([^<]+?)\s*<\/title>/i.exec(s);
+                if (mT && mT[1]) t = pickClean(mT[1]);
+              }
             }
           }
 
@@ -4905,96 +4893,68 @@ resolvers.push([
       };
 
       const addHint = (slug, name, sizeBytes) => {
-        try {
-          const dUrl = `${origin}/d/${slug}`;
-          if (name) {
-            try {
-              filesterNameBySlug.set(String(slug), String(name));
-            } catch (e) {}
-            try {
-              filesterNameByUrl.set(String(dUrl), String(name));
-            } catch (e) {}
-          }
-          if (sizeBytes) {
-            try {
-              filesterSizeBySlug.set(String(slug), Number(sizeBytes));
-            } catch (e) {}
-            try {
-              filesterSizeByUrl.set(String(dUrl), Number(sizeBytes));
-            } catch (e) {}
-          }
-          try {
-            filesterSlugByUrl.set(String(dUrl), String(slug));
-          } catch (e) {}
-        } catch (e) {}
+        const dUrl = `${origin}/d/${slug}`;
+        if (name) {
+          filesterNameBySlug.set(String(slug), String(name));
+          filesterNameByUrl.set(String(dUrl), String(name));
+        }
+        if (sizeBytes) {
+          filesterSizeBySlug.set(String(slug), Number(sizeBytes));
+          filesterSizeByUrl.set(String(dUrl), Number(sizeBytes));
+        }
+        filesterSlugByUrl.set(String(dUrl), String(slug));
       };
 
       const parsePage = (dom, html) => {
         const out = [];
-        try {
-          const items = dom ? [...dom.querySelectorAll('div.file-item')] : [];
-          for (const el of items) {
-            let slug = '';
-            try {
-              const oc = String(el.getAttribute('onclick') || '');
-              const m = /\/d\/([^'"?\s]+)/i.exec(oc);
-              if (m && m[1]) slug = m[1];
-            } catch (e) {}
+        const items = dom ? [...dom.querySelectorAll('div.file-item')] : [];
+        for (const el of items) {
+          let slug = '';
+          const oc = String(el.getAttribute('onclick') || '');
+          const m = /\/d\/([^'"?\s]+)/i.exec(oc);
+          if (m && m[1]) slug = m[1];
 
-            if (!slug) {
-              try {
-                const btn = el.querySelector('button.download-btn');
-                const oc2 = String(btn?.getAttribute?.('onclick') || '');
-                const m2 = /downloadFile\(\s*'([^']+)'/i.exec(oc2);
-                if (m2 && m2[1]) slug = m2[1];
-              } catch (e) {}
-            }
-
-            if (!slug) {
-              try {
-                const a = el.querySelector('a[href*="/d/"]');
-                const href = String(a?.getAttribute?.('href') || '');
-                const m3 = /\/d\/([^\/?#]+)/i.exec(href);
-                if (m3 && m3[1]) slug = m3[1];
-              } catch (e) {}
-            }
-
-            if (!slug) continue;
-
-            let name = '';
-            let size = 0;
-
-            try {
-              name = String(el.getAttribute('data-name') || '').trim();
-            } catch (e) {}
-            if (!name) {
-              try {
-                name = String(el.querySelector('.file-name')?.textContent || '').trim();
-              } catch (e) {}
-            }
-
-            try {
-              size = Number(el.getAttribute('data-size') || 0) || 0;
-            } catch (e) {}
-
-            out.push({ slug, name, size });
+          if (!slug) {
+            const btn = el.querySelector('button.download-btn');
+            const oc2 = String(btn?.getAttribute?.('onclick') || '');
+            const m2 = /downloadFile\(\s*'([^']+)'/i.exec(oc2);
+            if (m2 && m2[1]) slug = m2[1];
           }
-        } catch (e) {}
+
+          if (!slug) {
+            const a = el.querySelector('a[href*="/d/"]');
+            const href = String(a?.getAttribute?.('href') || '');
+            const m3 = /\/d\/([^\/?#]+)/i.exec(href);
+            if (m3 && m3[1]) slug = m3[1];
+          }
+
+          if (!slug) continue;
+
+          let name = '';
+          let size = 0;
+
+          name = String(el.getAttribute('data-name') || '').trim();
+          if (!name) {
+            name = String(el.querySelector('.file-name')?.textContent || '').trim();
+          }
+
+          size = Number(el.getAttribute('data-size') || 0) || 0;
+
+          out.push({ slug, name, size });
+        }
 
         // Regex fallback if DOM parsing is incomplete
-        try {
-          const s = String(html || '');
-          if (s) {
-            const rx = /data-name="([^"]+)"[^>]*\bonclick="window\.location\.href='\/d\/([^']+)'/gi;
-            let m;
-            while ((m = rx.exec(s)) !== null) {
-              const name = String(m[1] || '').trim();
-              const slug = String(m[2] || '').trim();
-              if (!slug) continue;
-              out.push({ slug, name, size: 0 });
-            }
+        const s = String(html || '');
+        if (s) {
+          const rx = /data-name="([^"]+)"[^>]*\bonclick="window\.location\.href='\/d\/([^']+)'/gi;
+          let m;
+          while ((m = rx.exec(s)) !== null) {
+            const name = String(m[1] || '').trim();
+            const slug = String(m[2] || '').trim();
+            if (!slug) continue;
+            out.push({ slug, name, size: 0 });
           }
-        } catch (e) {}
+        }
 
         return out;
       };
@@ -5027,8 +4987,6 @@ resolvers.push([
         }
 
         if (page === 1) {
-          firstDom = dom;
-          firstSource = source;
           folderName = getFolderName(dom, source);
         }
 
@@ -5051,11 +5009,9 @@ resolvers.push([
         if (added <= 0) break;
       }
 
-      if (!folderName) folderName = albumId;
-
       if (!resolved.length) return url;
 
-      return { dom: firstDom, source: firstSource, folderName, resolved };
+      return { folderName, resolved };
     } catch (e) {
       return url;
     }
@@ -5247,28 +5203,25 @@ resolvers.push([
     const filesterParseViewMeta = html => {
       const out = { fileName: '', fileType: '' };
       const s = String(html || '');
-      try {
-        // Prefer JSON-style double-quoted assignment: window.fileName = "..."
-        const m1 = /window\.fileName\s*=\s*("([^"\\]|\\.)*")\s*;?/m.exec(s);
-        if (m1 && m1[1]) out.fileName = JSON.parse(m1[1]);
-      } catch (e) {}
-      try {
-        // Fallback: single-quoted assignment: window.fileName = '...'
-        if (!out.fileName) {
-          const m1b = /window\.fileName\s*=\s*'([^'\\]*(?:\\.[^'\\]*)*)'\s*;?/m.exec(s);
-          if (m1b && m1b[1]) out.fileName = String(m1b[1]).replace(/\\'/g, "'").replace(/\\n/g, '\n');
+      const decode = raw => {
+        if (raw[0] === '"') {
+          try {
+            return JSON.parse(raw);
+          } catch (e) {
+            return '';
+          }
         }
-      } catch (e) {}
-      try {
-        const m2 = /window\.fileType\s*=\s*("([^"\\]|\\.)*")\s*;?/m.exec(s);
-        if (m2 && m2[1]) out.fileType = JSON.parse(m2[1]);
-      } catch (e) {}
-      try {
-        if (!out.fileType) {
-          const m2b = /window\.fileType\s*=\s*'([^'\\]*(?:\\.[^'\\]*)*)'\s*;?/m.exec(s);
-          if (m2b && m2b[1]) out.fileType = String(m2b[1]).replace(/\\'/g, "'").replace(/\\n/g, '\n');
-        }
-      } catch (e) {}
+        return String(raw.slice(1, -1)).replace(/\\'/g, "'").replace(/\\n/g, '\n');
+      };
+      const grab = key => {
+        const dq = new RegExp(`window\\.${key}\\s*=\\s*("(?:[^"\\\\]|\\\\.)*")\\s*;?`, 'm').exec(s);
+        if (dq && dq[1]) return decode(dq[1]);
+        const sq = new RegExp(`window\\.${key}\\s*=\\s*'([^'\\\\]*(?:\\\\.[^'\\\\]*)*)'\\s*;?`, 'm').exec(s);
+        if (sq && sq[1]) return decode(sq[1]);
+        return '';
+      };
+      out.fileName = grab('fileName');
+      out.fileType = grab('fileType');
       return out;
     };
 
@@ -5303,50 +5256,49 @@ resolvers.push([
     };
 
     const filesterParseDispositionFilename = headersRaw => {
-      try {
-        const h = String(headersRaw || '');
-        const mLine = /content-disposition:\s*([^\r\n]+)/i.exec(h);
-        if (!mLine || !mLine[1]) return '';
-        const v = String(mLine[1] || '');
+      const h = String(headersRaw || '');
+      const mLine = /content-disposition:\s*([^\r\n]+)/i.exec(h);
+      if (!mLine || !mLine[1]) return '';
+      const v = String(mLine[1] || '');
 
-        // RFC5987: filename*=UTF-8''...
-        let m = /filename\*\s*=\s*([^;]+)/i.exec(v);
-        if (m && m[1]) {
-          let val = String(m[1]).trim();
-          val = val.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+      // RFC5987: filename*=UTF-8''...
+      let m = /filename\*\s*=\s*([^;]+)/i.exec(v);
+      if (m && m[1]) {
+        let val = String(m[1]).trim();
+        val = val.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
 
-          const mEnc = /^([^']*)''(.*)$/.exec(val);
-          if (mEnc) {
-            let data = String(mEnc[2] || '').trim();
-            try {
-              data = decodeURIComponent(data.replace(/\+/g, '%20'));
-            } catch (e) {
-              // best-effort
-            }
-            if (data) return filesterNormalizeFilename(data);
-          } else {
-            try {
-              const decoded = decodeURIComponent(val.replace(/\+/g, '%20'));
-              if (decoded) return filesterNormalizeFilename(decoded);
-            } catch (e) {}
-            if (val) return filesterNormalizeFilename(val);
+        const mEnc = /^([^']*)''(.*)$/.exec(val);
+        if (mEnc) {
+          let data = String(mEnc[2] || '').trim();
+          try {
+            data = decodeURIComponent(data.replace(/\+/g, '%20'));
+          } catch (e) {
+            // best-effort
           }
+          if (data) return filesterNormalizeFilename(data);
+        } else {
+          try {
+            const decoded = decodeURIComponent(val.replace(/\+/g, '%20'));
+            if (decoded) return filesterNormalizeFilename(decoded);
+          } catch (e) {}
+          if (val) return filesterNormalizeFilename(val);
         }
+      }
 
-        // Basic: filename="..."
-        m = /filename\s*=\s*([^;]+)/i.exec(v);
-        if (m && m[1]) {
-          let val = String(m[1]).trim();
-          val = val.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
-          val = val.replace(/\\(.)/g, '$1');
-          return filesterNormalizeFilename(val);
-        }
-      } catch (e) {}
+      // Basic: filename="..."
+      m = /filename\s*=\s*([^;]+)/i.exec(v);
+      if (m && m[1]) {
+        let val = String(m[1]).trim();
+        val = val.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+        val = val.replace(/\\(.)/g, '$1');
+        return filesterNormalizeFilename(val);
+      }
       return '';
     };
 
     const filesterProbe = async probeUrl => {
       try {
+        // empty callback = headers-only request (aborts at readyState 2)
         const r = await http.base(
           'GET',
           probeUrl,
@@ -5375,19 +5327,6 @@ resolvers.push([
       try {
         const ref = `${apiBase}/d/${slug}`;
 
-        const normalizeMaybeUrl = v => {
-          try {
-            if (!v) return '';
-            const s = String(v).trim();
-            if (!s) return '';
-            if (s.startsWith('/')) return new URL(s, apiBase).href;
-            if (/^https?:\/\//i.test(s)) return s;
-            return '';
-          } catch (e) {
-            return '';
-          }
-        };
-
         // Phase 1: range request (follows redirects) to capture finalUrl without downloading the whole file.
         const r1 = await http.base('GET', tokenUrl, {}, { Range: 'bytes=0-0', Referer: ref, __xfpd_withCredentials: true }, null, 'text');
 
@@ -5395,7 +5334,7 @@ resolvers.push([
         const fu1 = String((r1 && r1.finalUrl) || '');
 
         const mLoc1 = /(?:^|\r?\n)location:\s*([^\r\n]+)/i.exec(headers1);
-        const loc1Abs = normalizeMaybeUrl(mLoc1 && mLoc1[1] ? mLoc1[1] : '');
+        const loc1Abs = normalizeUrl(mLoc1 && mLoc1[1] ? mLoc1[1] : '');
         if (loc1Abs && /\/v\//i.test(loc1Abs)) return loc1Abs;
         if (fu1 && /\/v\//i.test(fu1)) return fu1;
 
@@ -5418,7 +5357,7 @@ resolvers.push([
           const fu2 = String((r2 && r2.finalUrl) || '');
 
           const mLoc2 = /(?:^|\r?\n)location:\s*([^\r\n]+)/i.exec(headers2);
-          const loc2Abs = normalizeMaybeUrl(mLoc2 && mLoc2[1] ? mLoc2[1] : '');
+          const loc2Abs = normalizeUrl(mLoc2 && mLoc2[1] ? mLoc2[1] : '');
           if (loc2Abs && /\/v\//i.test(loc2Abs)) return loc2Abs;
           if (fu2 && /\/v\//i.test(fu2)) return fu2;
 
@@ -5437,6 +5376,33 @@ resolvers.push([
       }
     };
 
+    const recordStream = (streamUrl, p) => {
+      const streamCt = String((p && p.contentType) || '');
+      const streamSize = Number((p && p.size) || 0) || 0;
+      const streamHdrName = String((p && p.fileName) || '');
+      filesterSlugByUrl.set(String(streamUrl), String(slug));
+      const ref0 = relViewPath ? `${apiBase}${relViewPath}` : `${apiBase}/d/${slug}`;
+      if (ref0.startsWith('http')) {
+        filesterRefByUrl.set(String(streamUrl), String(ref0));
+        filesterRefByUrl.set(String(url), String(ref0));
+        filesterRefByUrl.set(`${apiBase}/d/${slug}`, String(ref0));
+      }
+      if (!nameHint && streamHdrName) nameHint = String(streamHdrName);
+      const ext = filesterExtFromCt(streamCt);
+      let finalName = nameHint || `Filester_${slug}.${ext || 'bin'}`;
+      if (!/\.[A-Za-z0-9]{1,8}$/.test(finalName) && ext) finalName = `${finalName}.${ext}`;
+      filesterNameBySlug.set(String(slug), String(finalName));
+      filesterNameByUrl.set(String(streamUrl), String(finalName));
+      filesterNameByUrl.set(String(url), String(finalName));
+      filesterNameByUrl.set(`${apiBase}/d/${slug}`, String(finalName));
+      if (relViewPath) filesterNameByUrl.set(`${apiBase}${relViewPath}`, String(finalName));
+      if (streamSize) {
+        filesterSizeBySlug.set(String(slug), Number(streamSize));
+        filesterSizeByUrl.set(String(streamUrl), Number(streamSize));
+      }
+      return streamUrl;
+    };
+
     try {
       if (progressCB) progressCB('[Filester] Fetching metadata...');
       const viewRes = await http.base('POST', `${apiBase}/api/public/view`, {}, mkHeaders(), JSON.stringify({ file_slug: slug }), 'text');
@@ -5444,28 +5410,26 @@ resolvers.push([
       if (viewJson) {
         nameHint = pickName(viewJson) || nameHint;
         sizeHint = pickSize(viewJson) || sizeHint;
-        try {
-          const relView = deepFindValueByKeys(viewJson, ['view_url', 'viewUrl', 'view']);
-          if (typeof relView === 'string' && relView.trim()) {
-            const s = String(relView).trim();
-            if (s.startsWith('/v/')) {
-              relViewPath = s;
-            } else if (s.startsWith('v/')) {
-              relViewPath = '/' + s;
-            } else if (/^https?:\/\//i.test(s)) {
-              try {
-                const u0 = new URL(s);
-                if (/^\/v\//i.test(String(u0.pathname || ''))) {
-                  relViewPath = String(u0.pathname || '') + String(u0.search || '');
-                }
-                // If the API already gave us a cache /v/ URL, keep it as an immediate candidate.
-                if (!streamUrlImmediate && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(s)) {
-                  streamUrlImmediate = s;
-                }
-              } catch (e) {}
-            }
+        const relView = deepFindValueByKeys(viewJson, ['view_url', 'viewUrl', 'view']);
+        if (typeof relView === 'string' && relView.trim()) {
+          const s = String(relView).trim();
+          if (s.startsWith('/v/')) {
+            relViewPath = s;
+          } else if (s.startsWith('v/')) {
+            relViewPath = '/' + s;
+          } else if (/^https?:\/\//i.test(s)) {
+            try {
+              const u0 = new URL(s);
+              if (/^\/v\//i.test(String(u0.pathname || ''))) {
+                relViewPath = String(u0.pathname || '') + String(u0.search || '');
+              }
+              // If the API already gave us a cache /v/ URL, keep it as an immediate candidate.
+              if (!streamUrlImmediate && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(s)) {
+                streamUrlImmediate = s;
+              }
+            } catch (e) {}
           }
-        } catch (e) {}
+        }
       }
     } catch (e) {}
 
@@ -5489,35 +5453,29 @@ resolvers.push([
         if (meta0 && meta0.fileName) nameHint = String(meta0.fileName);
 
         // If this request ended up at a /v/ URL, capture it.
-        try {
-          const fu0 = String((htmlRes0 && htmlRes0.finalUrl) || '');
-          if (fu0 && /\/v\//i.test(fu0)) {
-            if (!streamUrlImmediate && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(fu0)) {
-              streamUrlImmediate = fu0;
-            }
-            if (!relViewPath) {
-              try {
-                const u1 = new URL(fu0);
-                if (/^\/v\//i.test(String(u1.pathname || ''))) {
-                  relViewPath = String(u1.pathname || '') + String(u1.search || '');
-                }
-              } catch (e) {}
-            }
+        const fu0 = String((htmlRes0 && htmlRes0.finalUrl) || '');
+        if (fu0 && /\/v\//i.test(fu0)) {
+          if (!streamUrlImmediate && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(fu0)) {
+            streamUrlImmediate = fu0;
           }
-        } catch (e) {}
+          if (!relViewPath) {
+            try {
+              const u1 = new URL(fu0);
+              if (/^\/v\//i.test(String(u1.pathname || ''))) {
+                relViewPath = String(u1.pathname || '') + String(u1.search || '');
+              }
+            } catch (e) {}
+          }
+        }
 
         // Fallback: extract a /v/... token from the HTML itself.
         if (!streamUrlImmediate) {
-          try {
-            const mFull = /(https?:\/\/cache\d+\.filester\.(me|sh|si|gg)\/v\/[^\s"'<>]+)/i.exec(html0);
-            if (mFull && mFull[1] && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(mFull[1])) streamUrlImmediate = mFull[1];
-          } catch (e) {}
+          const mFull = /(https?:\/\/cache\d+\.filester\.(me|sh|si|gg)\/v\/[^\s"'<>]+)/i.exec(html0);
+          if (mFull && mFull[1] && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(mFull[1])) streamUrlImmediate = mFull[1];
         }
         if (!relViewPath) {
-          try {
-            const mRel = /["'](\/v\/[^"'<>\s]+)["']/i.exec(html0) || /(\/v\/[0-9a-f]{16,}[^"'<>\s]*)/i.exec(html0);
-            if (mRel && mRel[1] && String(mRel[1]).startsWith('/v/')) relViewPath = mRel[1];
-          } catch (e) {}
+          const mRel = /["'](\/v\/[^"'<>\s]+)["']/i.exec(html0) || /(\/v\/[0-9a-f]{16,}[^"'<>\s]*)/i.exec(html0);
+          if (mRel && mRel[1] && String(mRel[1]).startsWith('/v/')) relViewPath = mRel[1];
         }
       }
 
@@ -5556,10 +5514,8 @@ resolvers.push([
         const dlJson0 = safeJson(src0);
 
         let tokenUrl = null;
-        try {
-          const rel = dlJson0 ? deepFindValueByKeys(dlJson0, ['download_url', 'downloadUrl', 'url']) : null;
-          if (typeof rel === 'string' && rel.trim()) tokenUrl = normalizeUrl(rel);
-        } catch (e) {}
+        const rel = dlJson0 ? deepFindValueByKeys(dlJson0, ['download_url', 'downloadUrl', 'url']) : null;
+        if (typeof rel === 'string' && rel.trim()) tokenUrl = normalizeUrl(rel);
 
         if (!tokenUrl) {
           const m0 = /"download_url"\s*:\s*"([^"]+)"/i.exec(src0);
@@ -5569,24 +5525,20 @@ resolvers.push([
         if (tokenUrl) {
           // If the API returned a token (or /d/<token>), the actual stream is usually /v/<token> on cacheX.
           // Build relViewPath early so the probe loop can find a working cache host (cache6 preferred).
-          try {
-            let tokenStr = '';
-            try {
-              const tk = dlJson0 ? deepFindValueByKeys(dlJson0, ['token']) : null;
-              if (typeof tk === 'string') tokenStr = String(tk).trim();
-            } catch (e) {}
-            if (!tokenStr) {
-              const mTok = /\/d\/([^\/\?#]+)/i.exec(String(tokenUrl || ''));
-              if (mTok && mTok[1]) tokenStr = String(mTok[1]).trim();
-            }
-            if (tokenStr && !relViewPath) {
-              if (tokenStr.startsWith('/v/')) relViewPath = tokenStr;
-              else if (tokenStr.startsWith('v/')) relViewPath = '/' + tokenStr;
-              else if (tokenStr.startsWith('/d/')) relViewPath = tokenStr.replace(/^\/d\//i, '/v/');
-              else if (tokenStr.startsWith('d/')) relViewPath = '/' + tokenStr.replace(/^d\//i, 'v/');
-              else relViewPath = `/v/${tokenStr}`;
-            }
-          } catch (e) {}
+          let tokenStr = '';
+          const tk = dlJson0 ? deepFindValueByKeys(dlJson0, ['token']) : null;
+          if (typeof tk === 'string') tokenStr = String(tk).trim();
+          if (!tokenStr) {
+            const mTok = /\/d\/([^\/\?#]+)/i.exec(String(tokenUrl || ''));
+            if (mTok && mTok[1]) tokenStr = String(mTok[1]).trim();
+          }
+          if (tokenStr && !relViewPath) {
+            if (tokenStr.startsWith('/v/')) relViewPath = tokenStr;
+            else if (tokenStr.startsWith('v/')) relViewPath = '/' + tokenStr;
+            else if (tokenStr.startsWith('/d/')) relViewPath = tokenStr.replace(/^\/d\//i, '/v/');
+            else if (tokenStr.startsWith('d/')) relViewPath = '/' + tokenStr.replace(/^d\//i, 'v/');
+            else relViewPath = `/v/${tokenStr}`;
+          }
 
           const sUrl = await filesterResolveDownloadToken(tokenUrl);
           if (sUrl) {
@@ -5609,60 +5561,7 @@ resolvers.push([
       if (streamUrlImmediate) {
         if (progressCB) progressCB('[Filester] Probing discovered stream URL...');
         const p0 = await filesterProbe(streamUrlImmediate);
-        if (p0 && p0.ok) {
-          const streamUrl = String(streamUrlImmediate);
-          const streamCt = String(p0.contentType || '');
-          const streamSize = Number(p0.size || 0) || 0;
-          const streamHdrName = String((p0 && p0.fileName) || '');
-
-          try {
-            filesterSlugByUrl.set(String(streamUrl), String(slug));
-          } catch (e) {}
-          try {
-            const ref0 = relViewPath ? `${apiBase}${relViewPath}` : `${apiBase}/d/${slug}`;
-            if (ref0 && String(ref0).startsWith('http')) {
-              filesterRefByUrl.set(String(streamUrl), String(ref0));
-              filesterRefByUrl.set(String(url), String(ref0));
-              filesterRefByUrl.set(`${apiBase}/d/${slug}`, String(ref0));
-            }
-          } catch (e) {}
-          try {
-            if (!nameHint && streamHdrName) nameHint = String(streamHdrName);
-          } catch (e) {}
-
-          const ext = filesterExtFromCt(streamCt);
-          let finalName = '';
-          try {
-            if (nameHint) finalName = String(nameHint);
-          } catch (e) {}
-          if (!finalName) finalName = `Filester_${slug}.${ext || 'bin'}`;
-          try {
-            const hasExt = /\.[A-Za-z0-9]{1,8}$/.test(String(finalName || ''));
-            if (!hasExt && ext) finalName = `${finalName}.${ext}`;
-          } catch (e) {}
-
-          try {
-            filesterNameBySlug.set(String(slug), String(finalName));
-            filesterNameByUrl.set(String(streamUrl), String(finalName));
-            try {
-              filesterNameByUrl.set(String(url), String(finalName));
-            } catch (e) {}
-            try {
-              filesterNameByUrl.set(`${apiBase}/d/${slug}`, String(finalName));
-            } catch (e) {}
-            try {
-              if (relViewPath) filesterNameByUrl.set(`${apiBase}${relViewPath}`, String(finalName));
-            } catch (e) {}
-          } catch (e) {}
-          if (streamSize) {
-            try {
-              filesterSizeBySlug.set(String(slug), Number(streamSize));
-              filesterSizeByUrl.set(String(streamUrl), Number(streamSize));
-            } catch (e) {}
-          }
-
-          return streamUrl;
-        }
+        if (p0 && p0.ok) return recordStream(String(streamUrlImmediate), p0);
       }
     } catch (e) {}
 
@@ -5694,54 +5593,7 @@ resolvers.push([
           }
         }
 
-        if (streamUrl) {
-          try {
-            filesterSlugByUrl.set(String(streamUrl), String(slug));
-          } catch (e) {}
-          try {
-            const ref0 = relViewPath ? `${apiBase}${relViewPath}` : `${apiBase}/d/${slug}`;
-            if (ref0 && String(ref0).startsWith('http')) {
-              filesterRefByUrl.set(String(streamUrl), String(ref0));
-              filesterRefByUrl.set(String(url), String(ref0));
-              filesterRefByUrl.set(`${apiBase}/d/${slug}`, String(ref0));
-            }
-          } catch (e) {}
-          try {
-            if (!nameHint && streamHdrName) nameHint = String(streamHdrName);
-          } catch (e) {}
-          const ext = filesterExtFromCt(streamCt);
-          let finalName = '';
-          try {
-            if (nameHint) finalName = String(nameHint);
-          } catch (e) {}
-          if (!finalName) finalName = `Filester_${slug}.${ext || 'bin'}`;
-          try {
-            const hasExt = /\.[A-Za-z0-9]{1,8}$/.test(String(finalName || ''));
-            if (!hasExt && ext) finalName = `${finalName}.${ext}`;
-          } catch (e) {}
-
-          try {
-            filesterNameBySlug.set(String(slug), String(finalName));
-            filesterNameByUrl.set(String(streamUrl), String(finalName));
-            try {
-              filesterNameByUrl.set(String(url), String(finalName));
-            } catch (e) {}
-            try {
-              filesterNameByUrl.set(`${apiBase}/d/${slug}`, String(finalName));
-            } catch (e) {}
-            try {
-              if (relViewPath) filesterNameByUrl.set(`${apiBase}${relViewPath}`, String(finalName));
-            } catch (e) {}
-          } catch (e) {}
-          if (streamSize) {
-            try {
-              filesterSizeBySlug.set(String(slug), Number(streamSize));
-              filesterSizeByUrl.set(String(streamUrl), Number(streamSize));
-            } catch (e) {}
-          }
-
-          return streamUrl;
-        }
+        if (streamUrl) return recordStream(streamUrl, { contentType: streamCt, size: streamSize, fileName: streamHdrName });
       }
     } catch (e) {}
 
@@ -5757,10 +5609,8 @@ resolvers.push([
         dlUrl = pickBestUrl(dlJson);
       }
       if (dlJson && !dlUrl) {
-        try {
-          const rel = deepFindValueByKeys(dlJson, ['download_url', 'downloadUrl', 'url']);
-          if (typeof rel === 'string' && rel.startsWith('/')) dlUrl = `${apiBase}${rel}`;
-        } catch (e) {}
+        const rel = deepFindValueByKeys(dlJson, ['download_url', 'downloadUrl', 'url']);
+        if (typeof rel === 'string' && rel.startsWith('/')) dlUrl = `${apiBase}${rel}`;
       }
 
       if (dlJson && !dlUrl) {
@@ -5795,9 +5645,7 @@ resolvers.push([
       }
 
       if (dlUrl) {
-        try {
-          filesterSlugByUrl.set(String(dlUrl), String(slug));
-        } catch (e) {}
+        filesterSlugByUrl.set(String(dlUrl), String(slug));
 
         if (nameHint) {
           filesterNameBySlug.set(String(slug), String(nameHint));

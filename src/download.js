@@ -244,107 +244,8 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
   const filenames = [];
   const mimeTypes = [];
 
-  // Windows-safe sanitizers (used for folder/zip names). Kept local to downloadPost so it has access to settings.
-  const sanitizeWinSegment = (seg, fallback = 'file') => {
-    let s = String(seg ?? '').trim();
-
-    // If emojis are disabled, strip emoji/pictographs for consistent behavior across hosts.
-    if (settings?.naming?.allowEmojis === false) {
-      try {
-        s = s.replace(/\p{Extended_Pictographic}/gu, '');
-      } catch (e) {
-        // Fallback: strip surrogate pairs (covers most emoji)
-        s = s.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '');
-      }
-      // Remove variation selectors + ZWJ
-      s = s.replace(/[\uFE0E\uFE0F\u200D]/g, '');
-    }
-
-    // Replace Windows-invalid chars and control chars.
-    const sub = settings?.naming?.invalidCharSubstitute ?? '-';
-    s = s
-      .replace(/[\u0000-\u001f\u007f]/g, '')
-      .replace(/[<>:"/\\|?*]/g, sub)
-      .replace(/\s+/g, ' ')
-      .trim()
-      .replace(/[. ]+$/g, ''); // no trailing dots/spaces on Windows
-
-    if (!s) s = String(fallback || 'file');
-
-    // Avoid reserved device names on Windows.
-    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(s)) s = `_${s}`;
-
-    // Very long segments can cause path issues; keep it reasonable.
-    if (s.length > 180) s = s.slice(0, 180).trim();
-
-    return s;
-  };
-
-  const sanitizeWinPath = p => {
-    const parts = String(p ?? '')
-      .split('/')
-      .map(x => sanitizeWinSegment(x, ''))
-      .filter(Boolean);
-    return parts.join('/');
-  };
-
   const usedPaths = new Set();
-
-  const ensureUniquePath = path => {
-    let p = String(path || '').trim();
-    if (!p) {
-      p = 'file';
-    }
-
-    if (!usedPaths.has(p)) {
-      usedPaths.add(p);
-      return p;
-    }
-
-    const parts = p.split('/');
-    const base = parts.pop();
-    const dir = parts.length ? parts.join('/') : '';
-    const ext = h.ext(base);
-    const stem = ext ? h.fnNoExt(base) : base;
-
-    let i = 2;
-    while (true) {
-      const candidateBase = ext ? `${stem} (${i}).${ext}` : `${stem} (${i})`;
-      const candidate = dir ? `${dir}/${candidateBase}` : candidateBase;
-      if (!usedPaths.has(candidate)) {
-        usedPaths.add(candidate);
-        return candidate;
-      }
-      i++;
-    }
-  };
-
   const usedFlatNames = new Set();
-
-  const ensureUniqueFlatName = name => {
-    let n = String(name || '').trim();
-    if (!n) {
-      n = 'file';
-    }
-
-    if (!usedFlatNames.has(n)) {
-      usedFlatNames.add(n);
-      return n;
-    }
-
-    const ext = h.ext(n);
-    const stem = ext ? h.fnNoExt(n) : n;
-
-    let i = 2;
-    while (true) {
-      const candidate = ext ? `${stem} (${i}).${ext}` : `${stem} (${i})`;
-      if (!usedFlatNames.has(candidate)) {
-        usedFlatNames.add(candidate);
-        return candidate;
-      }
-      i++;
-    }
-  };
 
   setProcessing(true, postId);
 
@@ -387,41 +288,11 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
     const resources = resolved.filter(r => r.url);
     totalDownloadable = resources.length;
 
-    // Limit bunkr links to a single concurrent download.
-    let batchLength = resolved.some(file => /(turbocdn\.st|turbo\.cr|turbovid\.cr)/i.test(file.url))
-      ? 1
-      : resolved.some(file => /(bunkrr?\.\w+)|(bunkr-cache)/.test(file.url))
-        ? 1
-        : 2;
+    const batchLength = computeBatchLength(resolved);
 
     let currentBatch = 0;
 
-    const batches = [];
-
-    // Build batches:
-    // - keep existing concurrency (batchLength) for speed
-    // - but never put more than ONE GoFile item in the same batch (prevents GoFile "gate" spam / soft-block cascades)
-    const isGoFileUrlBatch = u => /gofile\.io/i.test(String(u || ''));
-
-    let tmp = [];
-    let tmpHasGoFile = false;
-
-    for (const item of resources) {
-      const isGF = isGoFileUrlBatch(item.url);
-      // if current batch is full OR would contain 2x GoFile -> flush
-      if (tmp.length >= batchLength || (tmpHasGoFile && isGF)) {
-        batches.push(tmp);
-        tmp = [];
-        tmpHasGoFile = false;
-      }
-
-      tmp.push(item);
-      if (isGF) tmpHasGoFile = true;
-    }
-
-    if (tmp.length) {
-      batches.push(tmp);
-    }
+    const batches = buildBatches(resources, batchLength);
 
     const getNextBatch = () => {
       const batch = currentBatch < batches.length ? batches[currentBatch] : [];
@@ -449,29 +320,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
       const TURBO_RETRY_DELAY_MS = 600; // small pause before re-sign retry
       const TURBO_DIRECT_DELAY_MS = 800; // small pause before DIRECT fallback
       const turboRetryState = new Map(); // key -> { resign: n, direct: n }
-
-      const isTurboUrl = u => /turbocdn\.st|turbo\.cr|turbovid\.cr/i.test(String(u || ''));
-
-      const turboExtractId = u => {
-        const s = String(u || '');
-        const m =
-          s.match(/\/\/(?:[\w-]+\.)?turbo\.cr\/(?:v|d|embed)\/([^\/?#]+)/i) ||
-          s.match(/\/\/(?:[\w-]+\.)?turbovid\.cr\/(?:v|d|embed)\/([^\/?#]+)/i);
-        return m && m[1] ? m[1] : '';
-      };
-
-      const turboExtractFn = u => {
-        const s = String(u || '');
-        const m = s.match(/[?&]fn=([^&]+)/i);
-        if (m && m[1]) {
-          try {
-            return decodeURIComponent(m[1].replace(/\+/g, '%20'));
-          } catch (e) {
-            return m[1];
-          }
-        }
-        return '';
-      };
 
       const gmGetTextWithHeaders = (getUrl, headers) =>
         new Promise(resolve => {
@@ -513,19 +361,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
 
         return null;
       };
-      const isGoFileUrl = u => /gofile\.io/i.test(String(u || ''));
-      const isPixeldrainUrl = u => /(?:pixeldrain\.com|pixeldrain\.net|pixeldra\.in)/i.test(String(u || ''));
-      const isImagebamCdnUrl = u => /https?:\/\/(?:images|thumbs)\d+\.imagebam\.com\//i.test(String(u || ''));
-      const imagebamRefererForCdn = u => {
-        try {
-          const uu = new URL(String(u || ''), location.origin);
-          const base = (uu.pathname || '').split('/').pop() || '';
-          const id = base.replace(/\.[a-z0-9]+$/i, '');
-          return id ? `https://www.imagebam.com/view/${id}` : 'https://www.imagebam.com/';
-        } catch (e) {
-          return 'https://www.imagebam.com/';
-        }
-      };
       const gofileWarmupAttempted = new Set();
       // url -> highest pass number currently authoritative. GM_xmlhttpRequest's abort()
       // isn't always reliable once a blob response is substantially buffered, so a
@@ -538,68 +373,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
       const BLOB_MAX_BYTES = Math.floor(1.6 * 1024 * 1024 * 1024);
       const BUNKR_DIRECT_MIN_BYTES = 500 * 1024 * 1024;
       const preflightMetaCache = new Map();
-      // Windows-safe filenames for GM_download (Chrome is stricter than Firefox).
-      const WIN_ILLEGAL_RE = /[<>:"\/\\|?*\x00-\x1F]/g;
-
-      const sanitizeWinSegment = s => {
-        const sub = settings && settings.naming && settings.naming.invalidCharSubstitute ? settings.naming.invalidCharSubstitute : '_';
-        let out = String(s || '');
-
-        // If emojis are disabled, strip emoji/pictographs for consistent behavior across hosts.
-        if (settings?.naming?.allowEmojis === false) {
-          try {
-            out = out.replace(/\p{Extended_Pictographic}/gu, '');
-          } catch (e) {
-            // Fallback: strip surrogate pairs (covers most emoji)
-            out = out.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '');
-          }
-          // Remove variation selectors + ZWJ
-          out = out.replace(/[\uFE0E\uFE0F\u200D]/g, '');
-        }
-        out = out.replace(WIN_ILLEGAL_RE, sub);
-        // Remove remaining control chars / oddities
-        out = out.replace(/[\x00-\x08\x0E-\x1F\x7F]/g, '');
-        // Windows also hates trailing dots/spaces in path segments
-        out = out.replace(/[\. ]+$/g, '').replace(/^[\. ]+/g, '');
-        if (!out) out = '_';
-        // Avoid reserved device names
-        if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(out)) out = '_' + out;
-        return out;
-      };
-
-      const sanitizeWinPath = p => {
-        return String(p || '')
-          .split('/')
-          .map(sanitizeWinSegment)
-          .join('/');
-      };
-
-      const headerValue = (headers, name) => {
-        try {
-          const re = new RegExp(`^${name}:\\s*([^\\r\\n]+)`, 'im');
-          const m = re.exec(headers || '');
-          return m && m[1] ? String(m[1]).trim() : '';
-        } catch (e) {
-          return '';
-        }
-      };
-
-      const parseDispositionFilename = headers => {
-        const hRaw = headers || '';
-        // RFC 5987 filename*=UTF-8''...
-        let m = /filename\*\s*=\s*UTF-8''([^;\r\n]+)/i.exec(hRaw);
-        if (m && m[1]) {
-          const raw = String(m[1]).trim().replace(/^"|"$/g, '');
-          try {
-            return decodeURIComponent(raw);
-          } catch (e) {
-            return raw;
-          }
-        }
-        m = /filename\s*=\s*"([^"\r\n]+)"/i.exec(hRaw) || /filename\s*=\s*([^;\r\n]+)/i.exec(hRaw);
-        if (m && m[1]) return String(m[1]).trim().replace(/^"|"$/g, '');
-        return '';
-      };
 
       const gmHead = (headUrl, reflink) =>
         new Promise(resolve => {
@@ -630,11 +403,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
             resolve({ ok: false, status: 0, text: '' });
           }
         });
-
-      const extractNum = v => {
-        const n = Number(v);
-        return Number.isFinite(n) ? n : 0;
-      };
 
       const preflightMeta = async (dlUrl, reflink, isGoFile, isPixeldrain) => {
         const key = `${dlUrl}`;
@@ -1206,8 +974,8 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
                     if (ext0) basename = `${basename}.${ext0}`;
                   }
 
-                  basename = sanitizeWinSegment(String(basename || ''));
-                  if (!basename) basename = sanitizeWinSegment(String(h.basename(strip(url)) || ''));
+                  basename = sanitizeWinSegment(String(basename || ''), settings?.naming);
+                  if (!basename) basename = sanitizeWinSegment(String(h.basename(strip(url)) || ''), settings?.naming);
                 }
               } catch (e) {}
             }
@@ -1286,12 +1054,12 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
               log.post.info(postId, `::Saving as (direct)::: ${basename}`, postNumber);
             }
 
-            let title = sanitizeWinSegment(threadTitle);
+            let title = sanitizeWinSegment(threadTitle, settings?.naming);
 
-            fn = sanitizeWinPath(fn);
-            fn = ensureUniquePath(fn);
+            fn = sanitizeWinPath(fn, settings?.naming);
+            fn = ensureUniquePath(fn, usedPaths, { ext: h.ext, fnNoExt: h.fnNoExt });
             basename = h.basename(fn);
-            const saveAsFF = `${title} #${postNumber} - ${ensureUniqueFlatName(fn.replace(/\//g, ' - '))}`;
+            const saveAsFF = `${title} #${postNumber} - ${ensureUniqueFlatName(fn.replace(/\//g, ' - '), usedFlatNames, { ext: h.ext, fnNoExt: h.fnNoExt })}`;
             const saveAsPath = `${title}/${fn}`;
             const saveAsName = isFF ? saveAsFF : saveAsPath;
 
@@ -2145,8 +1913,8 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
                     if (ext0) basename = `${basename}.${ext0}`;
                   }
 
-                  basename = sanitizeWinSegment(String(basename || ''));
-                  if (!basename) basename = sanitizeWinSegment(String(h.basename(strip(url)) || ''));
+                  basename = sanitizeWinSegment(String(basename || ''), settings?.naming);
+                  if (!basename) basename = sanitizeWinSegment(String(h.basename(strip(url)) || ''), settings?.naming);
                 }
               } catch (e) {}
             }
@@ -2184,7 +1952,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
                   basename = `Filester_${slug0}.${ext0}`;
                 }
 
-                basename = sanitizeWinSegment(String(basename || ''));
+                basename = sanitizeWinSegment(String(basename || ''), settings?.naming);
               } catch (e) {}
             }
 
@@ -2237,12 +2005,12 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
 
             const fileBlob = response.response;
 
-            let title = sanitizeWinSegment(threadTitle);
+            let title = sanitizeWinSegment(threadTitle, settings?.naming);
 
             // https://stackoverflow.com/a/53681022
-            fn = sanitizeWinPath(fn);
+            fn = sanitizeWinPath(fn, settings?.naming);
 
-            fn = ensureUniquePath(fn);
+            fn = ensureUniquePath(fn, usedPaths, { ext: h.ext, fnNoExt: h.fnNoExt });
             basename = h.basename(fn);
 
             if (!isFF) {
@@ -2253,7 +2021,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
               fn = `${fn}`;
             }
 
-            const saveAsFF = `${title} #${postNumber} - ${ensureUniqueFlatName(fn.replace(/\//g, ' - '))}`;
+            const saveAsFF = `${title} #${postNumber} - ${ensureUniqueFlatName(fn.replace(/\//g, ' - '), usedFlatNames, { ext: h.ext, fnNoExt: h.fnNoExt })}`;
             const saveAsPath = `${title}/${fn}`;
 
             const saveAsName = isFF && !zippedForThis ? saveAsFF : saveAsPath;
@@ -2450,7 +2218,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
   }
 
   if (totalDownloadable > 0) {
-    let title = sanitizeWinSegment(threadTitle);
+    let title = sanitizeZipTitleSegment(threadTitle, settings?.naming);
 
     const mainZipName = customFilename || `${title} #${postNumber}.zip`;
     const generatedZipName = `${title} #${postNumber} generated.zip`;

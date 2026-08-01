@@ -68,6 +68,58 @@ const ensureUniquePath = (path, usedPaths, { ext, fnNoExt }) => {
   }
 };
 
+// Shared size thresholds: Filester album planning and transfer routing use the same limits.
+const DOWNLOAD_BLOB_MAX_BYTES = Math.floor(1.6 * 1024 * 1024 * 1024);
+const BUNKR_DIRECT_MIN_BYTES = 500 * 1024 * 1024;
+
+const stripUrlQueryAndFragment = value =>
+  String(value || '')
+    .split('#')[0]
+    .split('?')[0];
+
+// Content-type -> file extension mapping shared by every host's filename fallback.
+// Options: { fallback?: string, pdf?: string, octetStream?: string }
+const downloadExtensionFromContentType = (contentType, options = {}) => {
+  const ct = String(contentType || '');
+  if (/video\/mp4/i.test(ct)) return 'mp4';
+  if (/video\/webm/i.test(ct)) return 'webm';
+  if (/image\/jpe?g/i.test(ct)) return 'jpg';
+  if (/image\/png/i.test(ct)) return 'png';
+  if (/image\/gif/i.test(ct)) return 'gif';
+  if (/application\/zip/i.test(ct)) return 'zip';
+  if (/application\/x-7z-compressed/i.test(ct)) return '7z';
+  if (/application\/(?:x-rar|vnd\.rar)/i.test(ct)) return 'rar';
+  if (/application\/pdf/i.test(ct)) return options.pdf ?? '';
+  if (/application\/octet-stream/i.test(ct)) return options.octetStream ?? '';
+  return options.fallback ?? '';
+};
+
+// Single place that joins a folder to a basename and reserves save-path collisions.
+// input: { basename, folderName, flatten, threadTitle, postNumber, isFirefox, zippedForThis, naming }
+// uniqueness: { usedPaths, usedFlatNames } | fileHelpers: { ext, fnNoExt }
+const planDownloadSavePath = (input, uniqueness, fileHelpers) => {
+  const { basename, folderName = '', flatten, threadTitle, postNumber, isFirefox, zippedForThis, naming } = input;
+  const { usedPaths, usedFlatNames } = uniqueness;
+  const { ext, fnNoExt } = fileHelpers;
+
+  const title = sanitizeWinSegment(threadTitle, naming);
+  let fn = String(basename || '');
+  if (!flatten && folderName && String(folderName).trim() !== '') {
+    fn = `${folderName}/${fn}`;
+  }
+  fn = sanitizeWinPath(fn, naming);
+  fn = ensureUniquePath(fn, usedPaths, { ext, fnNoExt });
+
+  const relativePath = fn;
+  const base = fn.split('/').pop();
+  const flatName = ensureUniqueFlatName(fn.replace(/\//g, ' - '), usedFlatNames, { ext, fnNoExt });
+  const saveAsFF = `${title} #${postNumber} - ${flatName}`;
+  const saveAsPath = `${title}/${relativePath}`;
+  const saveAsName = isFirefox && !zippedForThis ? saveAsFF : saveAsPath;
+
+  return { basename: base, relativePath, saveAsName };
+};
+
 const ensureUniqueFlatName = (name, usedFlatNames, { ext, fnNoExt }) => {
   let n = String(name || '').trim();
   if (!n) {
@@ -198,6 +250,11 @@ const buildBatches = (resources, batchLength, isGoFileUrlFn = isGoFileUrl) => {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    DOWNLOAD_BLOB_MAX_BYTES,
+    BUNKR_DIRECT_MIN_BYTES,
+    stripUrlQueryAndFragment,
+    downloadExtensionFromContentType,
+    planDownloadSavePath,
     sanitizeWinSegment,
     sanitizeWinPath,
     ensureUniquePath,

@@ -132,7 +132,6 @@ const filesterRefByUrl = new Map();
 // Filester: cache candidate fallback (some tokens are served from different cacheN hosts; cache6 is common but not guaranteed)
 const filesterCandidatesByToken = new Map(); // token -> string[]
 const filesterTriedByToken = new Map(); // token -> Set<string> of tried candidate URLs
-const filester429AttemptsByKey = new Map(); // token/url -> number of 429 retries (rate limiting)
 const filesterRetryAttemptsByKey = new Map(); // token/url -> number of retries on transient HTTP errors (429/400/etc)
 
 function filesterTokenFromVUrl(u) {

@@ -4,3 +4,4 @@ const FILES = ['header.js','globals.js','host-caches.js','bunkr.js','helpers.js'
 const out = FILES.map(f => fs.readFileSync(path.join('src', f), 'utf8')).join('\n') + '\n';
 fs.mkdirSync('dist', { recursive: true });
 fs.writeFileSync('dist/build.user.js', out);
+console.log('dist/build.user.js (%d bytes)', Buffer.byteLength(out));

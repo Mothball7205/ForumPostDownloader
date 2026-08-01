@@ -16,6 +16,11 @@ import {
   parseDispositionFilename,
   computeBatchLength,
   buildBatches,
+  DOWNLOAD_BLOB_MAX_BYTES,
+  BUNKR_DIRECT_MIN_BYTES,
+  stripUrlQueryAndFragment,
+  downloadExtensionFromContentType,
+  planDownloadSavePath,
 } from '../src/download-utils.js';
 
 // Mirrors h.ext / h.fnNoExt from src/helpers.js so the tests pin real behavior.
@@ -252,6 +257,118 @@ describe('parseDispositionFilename', () => {
   test('returns empty when absent', () => {
     expect(parseDispositionFilename('content-type: video/mp4')).toBe('');
     expect(parseDispositionFilename('')).toBe('');
+  });
+});
+
+describe('shared thresholds', () => {
+  test('DOWNLOAD_BLOB_MAX_BYTES is floor(1.6 GiB)', () => {
+    expect(DOWNLOAD_BLOB_MAX_BYTES).toBe(Math.floor(1.6 * 1024 * 1024 * 1024));
+  });
+
+  test('BUNKR_DIRECT_MIN_BYTES is 500 MiB', () => {
+    expect(BUNKR_DIRECT_MIN_BYTES).toBe(500 * 1024 * 1024);
+  });
+});
+
+describe('stripUrlQueryAndFragment', () => {
+  test('strips fragment then query', () => {
+    expect(stripUrlQueryAndFragment('https://x.example/a/b.mp4?size=1#part')).toBe('https://x.example/a/b.mp4');
+  });
+
+  test('strips query only', () => {
+    expect(stripUrlQueryAndFragment('clip.mp4?download=1')).toBe('clip.mp4');
+  });
+
+  test('strips fragment only', () => {
+    expect(stripUrlQueryAndFragment('clip.mp4#section')).toBe('clip.mp4');
+  });
+
+  test('returns input unchanged when clean', () => {
+    expect(stripUrlQueryAndFragment('clip.mp4')).toBe('clip.mp4');
+  });
+
+  test('empty and null input', () => {
+    expect(stripUrlQueryAndFragment('')).toBe('');
+    expect(stripUrlQueryAndFragment(null)).toBe('');
+    expect(stripUrlQueryAndFragment(undefined)).toBe('');
+  });
+});
+
+describe('downloadExtensionFromContentType', () => {
+  test('maps known types', () => {
+    expect(downloadExtensionFromContentType('video/mp4')).toBe('mp4');
+    expect(downloadExtensionFromContentType('VIDEO/WEBM')).toBe('webm');
+    expect(downloadExtensionFromContentType('image/jpeg')).toBe('jpg');
+    expect(downloadExtensionFromContentType('image/jpg')).toBe('jpg');
+    expect(downloadExtensionFromContentType('image/png')).toBe('png');
+    expect(downloadExtensionFromContentType('image/gif')).toBe('gif');
+    expect(downloadExtensionFromContentType('application/zip')).toBe('zip');
+    expect(downloadExtensionFromContentType('application/x-7z-compressed')).toBe('7z');
+    expect(downloadExtensionFromContentType('application/x-rar')).toBe('rar');
+    expect(downloadExtensionFromContentType('application/vnd.rar')).toBe('rar');
+  });
+
+  test('Bunkr options: pdf and octet-stream', () => {
+    const opts = { pdf: 'pdf', octetStream: 'rar' };
+    expect(downloadExtensionFromContentType('application/pdf', opts)).toBe('pdf');
+    expect(downloadExtensionFromContentType('application/octet-stream', opts)).toBe('rar');
+  });
+
+  test('Filester options: unknown falls back to bin, octet-stream does not map to rar', () => {
+    const opts = { fallback: 'bin' };
+    expect(downloadExtensionFromContentType('application/x-unknown', opts)).toBe('bin');
+    expect(downloadExtensionFromContentType('', opts)).toBe('bin');
+    expect(downloadExtensionFromContentType('application/octet-stream', opts)).toBe('');
+  });
+
+  test('no options: unknown maps to empty string', () => {
+    expect(downloadExtensionFromContentType('application/x-unknown')).toBe('');
+  });
+});
+
+describe('planDownloadSavePath', () => {
+  const uniqueness = () => ({ usedPaths: new Set(), usedFlatNames: new Set() });
+  const baseInput = {
+    threadTitle: 'Thread',
+    postNumber: 42,
+    folderName: 'Album',
+    basename: 'clip.mp4',
+    flatten: false,
+    isFirefox: false,
+    zippedForThis: false,
+    naming: { allowEmojis: false, invalidCharSubstitute: '-' },
+  };
+
+  test('joins folder to basename and prefixes the sanitized title', () => {
+    const result = planDownloadSavePath(baseInput, uniqueness(), helpers);
+    expect(result.relativePath).toBe('Album/clip.mp4');
+    expect(result.saveAsName).toBe('Thread/Album/clip.mp4');
+    expect(result.basename).toBe('clip.mp4');
+  });
+
+  test('appends (2) on path collision', () => {
+    const u = uniqueness();
+    const first = planDownloadSavePath(baseInput, u, helpers);
+    expect(first.relativePath).toBe('Album/clip.mp4');
+    const second = planDownloadSavePath(baseInput, u, helpers);
+    expect(second.basename).toBe('clip (2).mp4');
+    expect(second.relativePath).toBe('Album/clip (2).mp4');
+  });
+
+  test('flatten drops the folder segment', () => {
+    const result = planDownloadSavePath({ ...baseInput, flatten: true }, uniqueness(), helpers);
+    expect(result.relativePath).toBe('clip.mp4');
+    expect(result.saveAsName).toBe('Thread/clip.mp4');
+  });
+
+  test('Firefox unzipped uses the flat dash-separated name', () => {
+    const result = planDownloadSavePath({ ...baseInput, isFirefox: true, zippedForThis: false }, uniqueness(), helpers);
+    expect(result.saveAsName).toBe('Thread #42 - Album - clip.mp4');
+  });
+
+  test('Firefox zipped keeps the titled path', () => {
+    const result = planDownloadSavePath({ ...baseInput, isFirefox: true, zippedForThis: true }, uniqueness(), helpers);
+    expect(result.saveAsName).toBe('Thread/Album/clip.mp4');
   });
 });
 

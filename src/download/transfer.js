@@ -57,8 +57,7 @@ const classifyDownloadAttempt = (resource, pass) => {
     String((host && host.name) || '').toLowerCase() === 'bunkr' ||
     /bunkr/i.test(String(url || '')) ||
     /bunkr/i.test(String(original || ''));
-  const isFilester =
-    String((host && host.name) || '').toLowerCase() === 'filester' || /(?:^|\.)filester\.(me|sh|si|gg)/i.test(String(url || ''));
+  const isFilester = String((host && host.name) || '').toLowerCase() === 'filester' || isFilesterUrl(url);
 
   let reflink = original;
   if (url.includes('bunkr')) {
@@ -70,8 +69,8 @@ const classifyDownloadAttempt = (resource, pass) => {
   if (url.includes('turbocdn.st')) {
     reflink = 'https://turbo.cr/';
   }
-  if (/(?:\bfilester\.(me|sh|si|gg)\b|cache\d+\.filester\.(me|sh|si|gg))/i.test(String(url || ''))) {
-    reflink = 'https://filester.me/';
+  if (isFilester) {
+    reflink = filesterRefByUrl.get(String(url)) || original || 'https://filester.me/';
   }
 
   // Cyberdrop: normalize referer/origin and build a /f/ page for optional warm-up.
@@ -217,11 +216,19 @@ const runDownloadTransfers = async run => {
         } catch (e) {}
       }
 
-      // Filester: turn short /d/<slug> view URLs into cache /v/<token> stream URLs (no tabs).
-      // Album pages (/f/...) mostly contain only short slugs, which require this token step.
+      // Albums yield /d/ pages; resolve them through the same v2 API as single files.
       if (isFilester) {
         const preppedUrl = String(resource.url || '');
         const streamUrl = await prepareFilesterDownloadResource(resource, { postId, postNumber, tokenLogState: batchState });
+        if (!streamUrl) {
+          actions.settle(attempt, {
+            statusColor: '#b23b3b',
+            updateStatus: true,
+            updateTotalProgress: true,
+            log: { level: 'error', message: `::Filester resolution failed::: ${preppedUrl}` },
+          });
+          return;
+        }
         if (streamUrl !== preppedUrl) {
           url = streamUrl;
           attempt.url = streamUrl;
@@ -257,6 +264,7 @@ const runDownloadTransfers = async run => {
       let switchedToDirect = false;
 
       const startDirectDownload = (metaHint = null) => {
+        switchedToDirect = true;
         downloadResourceDirect(run, batchState, attempt, metaHint, actions);
       };
 
@@ -371,6 +379,7 @@ const runDownloadTransfers = async run => {
         onload: async response => {
           const p = batchState.requestProgress.find(r => r.url === progressKey);
           if (p) clearInterval(p.intervalId);
+          if (switchedToDirect) return;
 
           if (abortReason === 'bunkr_maint' && bunkrMaintenanceHandled) return;
           // GoFile: this pass was superseded by a stall-triggered warm-up retry
@@ -794,6 +803,11 @@ const runDownloadTransfers = async run => {
       const intervalId = setInterval(async () => {
         const p = batchState.requestProgress.find(r => r.url === progressKey);
         if (!p) return;
+        // The direct transfer owns completion after a large-file handoff.
+        if (switchedToDirect) {
+          clearInterval(p.intervalId);
+          return;
+        }
 
         if (p.old === p.new) {
           const rr = batchState.requests.find(r => r.url === progressKey);

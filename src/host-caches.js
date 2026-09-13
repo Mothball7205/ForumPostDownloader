@@ -128,35 +128,127 @@ const filesterSizeBySlug = new Map();
 const filesterSizeByUrl = new Map();
 const filesterSlugByUrl = new Map();
 const filesterRefByUrl = new Map();
+const filesterV2Urls = new Set();
 
-// Filester: cache candidate fallback (some tokens are served from different cacheN hosts; cache6 is common but not guaranteed)
+// Legacy /v/ streams can move between CDN hosts. V2 tokens are bound to their
+// API-selected server and must never enter this candidate ladder.
 const filesterCandidatesByToken = new Map(); // token -> string[]
 const filesterTriedByToken = new Map(); // token -> Set<string> of tried candidate URLs
 const filesterRetryAttemptsByKey = new Map(); // token/url -> number of retries on transient HTTP errors (429/400/etc)
 
-function filesterTokenFromVUrl(u) {
+const FILESTER_STREAM_HOSTS = [
+  'https://fsc1.cdn.cr',
+  'https://fsc2.cdn.cr',
+  'https://fsc3.cdn.cr',
+  'https://cache2.filester.me',
+  'https://cache3.filester.me',
+  'https://cache4.filester.me',
+  'https://cache5.filester.me',
+  'https://cache7.filester.me',
+  'https://cache8.filester.me',
+  'https://cache6.filester.me',
+  'https://cache1.filester.me',
+];
+const FILESTER_PROBE_TIMEOUT_MS = 8000;
+const FILESTER_PROBE_BUDGET_MS = 25000;
+const FILESTER_API_TIMEOUT_MS = 20000;
+
+function filesterTokenFromVUrl(url) {
   try {
-    const m = /\/v\/([^\/?#]+)/i.exec(String(u || ''));
-    return m && m[1] ? String(m[1]) : '';
+    if (filesterV2Urls.has(String(url))) return '';
+    const match = /^\/v\/([^/]+)\/?$/i.exec(new URL(String(url)).pathname);
+    return match ? match[1] : '';
   } catch (e) {
     return '';
   }
 }
 
-function filesterBuildCandidates(token) {
-  const t = String(token || '').trim();
-  if (!t) return [];
-  const order = [6, 1, 2, 3, 4, 5, 7, 8];
-  const out = [];
-  for (const n of order) out.push(`https://cache${n}.filester.me/v/${t}`);
-  out.push(`https://filester.me/v/${t}`);
-  return out;
+function filesterBuildCandidates(token, apiBase = 'https://filester.me') {
+  const value = String(token || '').trim();
+  if (!value) return [];
+  return [...FILESTER_STREAM_HOSTS, String(apiBase).replace(/\/+$/, '')].map(base => `${base}/v/${value}`);
+}
+
+function filesterParseFileUrl(url) {
+  try {
+    let value = String(url || '').trim();
+    if (value.startsWith('//')) value = `https:${value}`;
+    else if (!/^https?:\/\//i.test(value)) value = `https://${value}`;
+    const parsed = new URL(value);
+    if (!/^(?:[a-z0-9-]+\.)*filester\.(me|sh|si|gg)$/i.test(parsed.hostname)) return null;
+    const match = /^\/d\/([^/]+)\/?$/i.exec(parsed.pathname);
+    if (!match) return null;
+    return { slug: match[1], apiBase: `https://${parsed.hostname}`, url: parsed.href };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Recognise API-issued streams by provenance, not a fixed CDN hostname list.
+function isFilesterUrl(url) {
+  const value = String(url || '');
+  return (
+    filesterSlugByUrl.has(value) ||
+    /^(?:https?:)?\/\/(?:[a-z0-9-]+\.)*filester\.(me|sh|si|gg)\/(?:d|v)\//i.test(value) ||
+    !!filesterParseFileUrl(value)
+  );
+}
+
+// Shared by single links and album items, which obtain their short-lived token
+// only when downloading. The retired v1 API returns dead links even on HTTP 200.
+async function filesterResolveV2(http, apiBase, slug, progressCB) {
+  const base = String(apiBase || 'https://filester.me').replace(/\/+$/, '');
+  const value = String(slug || '').trim();
+  if (!value) return null;
+  const ref = `${base}/d/${value}`;
+
+  try {
+    if (typeof progressCB === 'function') progressCB('[Filester] Requesting download token (v2)...');
+    const response = await http.post(
+      `${base}/v2/api/public/download`,
+      JSON.stringify({ file_slug: value }),
+      {},
+      {
+        Accept: 'application/json, text/plain, */*',
+        'Content-Type': 'application/json;charset=UTF-8',
+        Origin: base,
+        Referer: ref,
+        __xfpd_withCredentials: true,
+      },
+      'text',
+      FILESTER_API_TIMEOUT_MS,
+    );
+    if (!(response?.status >= 200 && response.status < 300)) return null;
+    const data = JSON.parse(response.source);
+    const server = typeof data?.server === 'string' ? data.server.replace(/\/+$/, '') : '';
+    const file = typeof data?.file === 'string' ? data.file : '';
+    const token = typeof data?.token === 'string' ? data.token : '';
+    if (!server || !file || !token) return null;
+    const serverUrl = new URL(server);
+    if (!/^https?:$/.test(serverUrl.protocol) || serverUrl.username || serverUrl.password || serverUrl.search || serverUrl.hash) {
+      return null;
+    }
+
+    const name =
+      (typeof data.name === 'string' && data.name.trim()) ||
+      filesterNameBySlug.get(value) ||
+      `Filester_${value}${(/\.[A-Za-z0-9]{1,8}$/.exec(file) || [''])[0]}`;
+    const filePath = file.split('/').map(encodeURIComponent).join('/');
+    const streamUrl = `${server}/v2/${filePath}?token=${encodeURIComponent(token)}&download=true&n=${encodeURIComponent(name)}`;
+    filesterV2Urls.add(streamUrl);
+    filesterNameBySlug.set(value, name);
+    for (const key of [ref, streamUrl]) {
+      filesterSlugByUrl.set(key, value);
+      filesterRefByUrl.set(key, ref);
+      filesterNameByUrl.set(key, name);
+      const size = filesterSizeBySlug.get(value);
+      if (size > 0) filesterSizeByUrl.set(key, size);
+    }
+    return { url: streamUrl, name, ref };
+  } catch (e) {
+    return null;
+  }
 }
 
 // Bunkr filename hints (from /v/ pages)
 const bunkrNameByUrl = new Map();
-
-// Goonbox: embedded medium-res thumbnail per /img/ link, used as a download fallback when the
-// API's original_url 404s (post-migration, some originals are missing but the .md. thumbnail --
-// also hosted on cuckcapital.cr -- still exists).
-const goonboxThumbByUrl = new Map();

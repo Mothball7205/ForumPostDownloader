@@ -1,5 +1,5 @@
 // Filester: classification, album ZIP-vs-DIRECT policy (applied once per post,
-// not once per batch), /d/->/v/ token preparation, and DIRECT cache preflight.
+// not once per batch), /d/->v2 token preparation, and bounded DIRECT preflight.
 const FIL_IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif', '.tif', '.tiff', '.jxl', '.heic', '.heif']);
 const FIL_VID_EXTS = new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.3gp']);
 
@@ -12,9 +12,9 @@ const filesterGuessExt = s => {
 const filesterSlugFromUrl = u0 => {
   try {
     const s = String(u0 || '');
-    const mD = /\/d\/([^\/?#]+)/i.exec(s);
+    const mD = /^(?:(?:https?:)?\/\/)?(?:[a-z0-9-]+\.)*filester\.(?:me|sh|si|gg)\/d\/([^\/?#]+)/i.exec(s);
     if (mD && mD[1]) return String(mD[1]);
-    // cacheN /v/ tokens -> map back to slug when known
+    // API-issued CDN streams and legacy /v/ tokens map back to their file slug.
     const s2 = String(filesterSlugByUrl.get(String(u0)) || '');
     if (s2) return s2;
   } catch (e) {}
@@ -216,182 +216,81 @@ const applyFilesterAlbumPolicy = async (resources, { zipped, readMetadata, postI
   } catch (e) {}
 };
 
-// Turn short /d/<slug> view URLs into cache /v/<token> stream URLs (no tabs).
-// Album pages (/f/...) mostly contain only short slugs, which require this token step.
-// Mutates resource.url; returns the (possibly unchanged) stream URL.
+// Album pages yield /d/<slug> links. Resolve their short-lived v2 tokens only
+// when downloading; return null on failure so the caller never saves view HTML.
 const prepareFilesterDownloadResource = async (resource, { postId, postNumber, tokenLogState }) => {
   const originalUrl = String((resource && resource.url) || '');
-  try {
-    const uF = new URL(originalUrl);
-    const isFilesterD = /(^|\.)filester\.(me|sh|si|gg)$/i.test(String(uF.host || '')) && /^\/d\//i.test(String(uF.pathname || ''));
-    if (!isFilesterD) return originalUrl;
+  const file = filesterParseFileUrl(originalUrl);
+  if (!file) return originalUrl;
+  const stream = await filesterResolveV2(h.http, file.apiBase, file.slug);
+  if (!stream) return null;
 
-    const slug =
-      String(uF.pathname || '')
-        .split('/')
-        .filter(Boolean)
-        .pop() || '';
-    // Short slugs look like "d8ZdCxc" / "QnUVP6A" etc.
-    const looksLikeShortSlug = /^[A-Za-z0-9]{6,12}$/.test(slug);
-    if (!looksLikeShortSlug) return originalUrl;
-
-    const apiRes = await h.http.base(
-      'POST',
-      'https://filester.me/api/public/download',
-      {},
-      {
-        Accept: 'application/json, text/plain, */*',
-        'Content-Type': 'application/json',
-        Origin: 'https://filester.me',
-        Referer: `https://filester.me/d/${slug}`,
-        __xfpd_withCredentials: true,
-      },
-      JSON.stringify({ file_slug: slug }),
-      'text',
-    );
-
-    const txt = String((apiRes && apiRes.source) || '');
-    let j = null;
-    try {
-      j = JSON.parse(txt);
-    } catch (e) {}
-
-    let token = '';
-    try {
-      if (j && typeof j.token === 'string') token = String(j.token).trim();
-    } catch (e) {}
-    if (!token) {
-      try {
-        const rel = j && (j.download_url || j.downloadUrl || j.url);
-        if (typeof rel === 'string' && rel.trim()) {
-          const m = /\/d\/([^\/?#]+)/i.exec(String(rel));
-          if (m && m[1]) token = String(m[1]).trim();
-        }
-      } catch (e) {}
-    }
-    if (!token) {
-      const m2 = /"token"\s*:\s*"([^"]+)"/i.exec(txt);
-      if (m2 && m2[1]) token = String(m2[1]).trim();
-    }
-
-    if (!token) return originalUrl;
-
-    const candidates = filesterBuildCandidates(token);
-    const streamUrl = candidates && candidates.length ? candidates[0] : `https://cache6.filester.me/v/${token}`;
-    try {
-      filesterCandidatesByToken.set(String(token), candidates);
-    } catch (e) {}
-    try {
-      for (const c of candidates || []) {
-        try {
-          filesterSlugByUrl.set(String(c), String(slug));
-        } catch (e) {}
-        try {
-          filesterRefByUrl.set(String(c), 'https://filester.me/');
-        } catch (e) {}
-      }
-    } catch (e) {}
-    if (!tokenLogState.filesterNoTabTokenLogged) {
-      tokenLogState.filesterNoTabTokenLogged = true;
-      log.post.info(postId, `::Filester slug->token->cache (no tab)::: ${slug} -> ${streamUrl}`, postNumber);
-    }
-
-    try {
-      filesterSlugByUrl.set(String(streamUrl), String(slug));
-    } catch (e) {}
-    try {
-      filesterRefByUrl.set(String(streamUrl), 'https://filester.me/');
-    } catch (e) {}
-    try {
-      filesterRefByUrl.set(String(originalUrl), 'https://filester.me/');
-    } catch (e) {}
-    resource.url = streamUrl;
-    return streamUrl;
-  } catch (e) {
-    return originalUrl;
+  filesterNameByUrl.set(originalUrl, stream.name);
+  filesterRefByUrl.set(originalUrl, stream.ref);
+  filesterSlugByUrl.set(originalUrl, file.slug);
+  resource.url = stream.url;
+  if (!tokenLogState.filesterNoTabTokenLogged) {
+    tokenLogState.filesterNoTabTokenLogged = true;
+    log.post.info(postId, `::Filester slug->v2 token (no tab)::: ${file.slug} -> ${stream.url}`, postNumber);
   }
+  return stream.url;
 };
 
-// Filester DIRECT: probe candidate cache hosts (Range: bytes=0-0) and pick the
-// first healthy one before GM_download. Returns { directUrl, preflightDone }.
+// V2 tokens are server-bound: only preflight the issued URL. Legacy /v/ streams
+// may rotate hosts, within both a per-request deadline and a total probe budget.
 const selectFilesterDirectUrl = async (url, resource, { postId, postNumber }) => {
-  try {
-    const ref = String(filesterRefByUrl.get(String(url)) || (resource && resource.original) || 'https://filester.me/');
-    const token0 = filesterTokenFromVUrl(String(url || ''));
+  const originalUrl = String(url || '');
+  const token = filesterTokenFromVUrl(originalUrl);
+  if (!token && !isFilesterUrl(originalUrl)) return { directUrl: originalUrl, preflightDone: false };
 
-    if (!token0) return { directUrl: String(url), preflightDone: false };
+  const ref = String(filesterRefByUrl.get(originalUrl) || (resource && resource.original) || 'https://filester.me/');
+  const candidates = token
+    ? [...new Set([originalUrl, ...(filesterCandidatesByToken.get(token) || filesterBuildCandidates(token))])]
+    : [originalUrl];
+  const deadline = Date.now() + FILESTER_PROBE_BUDGET_MS;
 
-    let candidates0 = filesterCandidatesByToken.get(token0) || filesterBuildCandidates(token0);
-    candidates0 = Array.isArray(candidates0) ? candidates0.slice() : [];
+  for (let i = 0; i < Math.min(3, candidates.length); i++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const candidate = candidates[i];
+    let response = null;
+    try {
+      response = await h.http.get(
+        candidate,
+        { onResponseHeadersReceieved: () => {} },
+        { Range: 'bytes=0-0', Accept: '*/*', Referer: ref, __xfpd_withCredentials: true },
+        'text',
+        Math.min(FILESTER_PROBE_TIMEOUT_MS, remaining),
+      );
+    } catch (e) {}
 
-    const u0 = String(url);
-    const ix = candidates0.indexOf(u0);
-    if (ix >= 0) candidates0.splice(ix, 1);
-    candidates0.unshift(u0);
-
-    const cacheLabel = u => {
-      const m = String(u || '').match(/https?:\/\/cache(\d+)\.filester\.(me|sh|si|gg)/i);
-      return m && m[1] ? `cache${m[1]}` : String(u || '').includes('filester.me') ? 'filester' : 'url';
-    };
-
-    const isRetryableStatus = st => {
-      const n = Number(st || 0) || 0;
-      return n === 0 || n === 400 || n === 403 || n === 404 || n === 429 || (n >= 500 && n <= 599);
-    };
-
-    const delays = [650, 1300, 2000];
-
-    for (let i = 0; i < 3; i++) {
-      const cand = candidates0[i] || u0;
-
-      const pre = await new Promise(resolve => {
-        try {
-          GM_xmlhttpRequest({
-            method: 'GET',
-            url: String(cand),
-            responseType: 'text',
-            anonymous: false,
-            withCredentials: true,
-            timeout: 5000,
-            headers: { Range: 'bytes=0-0', Accept: '*/*', Referer: ref },
-            onload: r => resolve(r),
-            onerror: _ => resolve(null),
-            ontimeout: _ => resolve(null),
-          });
-        } catch (e) {
-          resolve(null);
-        }
-      });
-
-      const st0 = Number((pre && pre.status) || 0) || 0;
-      const finalUrl = pre && (pre.finalUrl || pre.responseURL) ? String(pre.finalUrl || pre.responseURL) : '';
-      const ok = st0 && st0 < 400;
-
-      if (ok) {
-        const directUrl = finalUrl && /^https?:\/\//i.test(finalUrl) ? finalUrl : String(cand);
-
-        if (i > 0 || String(cand) !== u0 || (finalUrl && finalUrl !== cand)) {
-          log.post.info(postId, `::Filester DIRECT picked ${cacheLabel(cand)} (HTTP ${st0})::: ${directUrl}`, postNumber);
-        }
-        return { directUrl, preflightDone: true };
+    const status = Number(response?.status) || 0;
+    const headers = String(response?.responseHeaders || '');
+    const isGate = /(?:^|\r?\n)content-type:\s*(?:text\/html|application\/xhtml\+xml|application\/json)/i.test(headers);
+    if (status >= 200 && status < 400 && !isGate) {
+      const finalUrl = String(response.finalUrl || '');
+      const directUrl = /^https?:\/\//i.test(finalUrl) ? finalUrl : candidate;
+      const slug = filesterSlugByUrl.get(originalUrl);
+      if (filesterV2Urls.has(originalUrl)) filesterV2Urls.add(directUrl);
+      if (slug) filesterSlugByUrl.set(directUrl, slug);
+      filesterRefByUrl.set(directUrl, ref);
+      if (directUrl !== originalUrl) {
+        log.post.info(postId, `::Filester DIRECT selected stream (HTTP ${status})::: ${directUrl}`, postNumber);
       }
-
-      if (i < 2 && isRetryableStatus(st0) && candidates0[i + 1]) {
-        const next = candidates0[i + 1];
-        const delay = delays[i] || 1000;
-        log.post.info(
-          postId,
-          `::Filester DIRECT HTTP ${st0 || 0} -> retry [${i + 1}/3] after ${delay}ms; switching ${cacheLabel(cand)}->${cacheLabel(next)}::: ${next}`,
-          postNumber,
-        );
-        await h.delayedResolve(delay);
-      }
+      return { directUrl, preflightDone: true };
     }
 
-    return { directUrl: String(url), preflightDone: true };
-  } catch (e) {
-    return { directUrl: String(url), preflightDone: false };
+    const retryable = status === 0 || [400, 403, 404, 429].includes(status) || status >= 500;
+    if (!retryable) break;
+    if (i + 1 < Math.min(3, candidates.length)) {
+      const delay = Math.min(650 * (i + 1), deadline - Date.now());
+      if (delay <= 0) break;
+      log.post.info(postId, `::Filester DIRECT HTTP ${status} -> trying another legacy CDN::: ${candidates[i + 1]}`, postNumber);
+      await h.delayedResolve(delay);
+    }
   }
+
+  return { directUrl: originalUrl, preflightDone: true };
 };
 
 if (typeof module !== 'undefined' && module.exports) {

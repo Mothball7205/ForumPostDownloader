@@ -4,7 +4,7 @@
 // @namespace https://github.com/SkyCloudDev
 // @author SkyCloudDev
 // @description Downloads images and videos from posts
-// @version 4.1.0
+// @version 4.2.0
 // @updateURL https://github.com/Mothball7205/ForumPostDownloader/raw/main/dist/build.user.js
 // @downloadURL https://github.com/Mothball7205/ForumPostDownloader/raw/main/dist/build.user.js
 // @icon https://simp4.cuckcapital.cr/simpcityIcon192.png
@@ -16,6 +16,10 @@
 // @match https://simpcity.rs/threads/*
 // @match https://simpcity.ax/threads/*
 // @match https://gofile.io/*
+// @match https://goonbox.cr/img/*
+// @match https://goonbox.cr/a/*
+// @match https://www.goonbox.cr/img/*
+// @match https://www.goonbox.cr/a/*
 // @require https://unpkg.com/@popperjs/core@2
 // @require https://unpkg.com/tippy.js@6
 // @require https://unpkg.com/file-saver@2.0.4/dist/FileSaver.min.js
@@ -125,6 +129,9 @@
 // @grant GM_download
 // @grant GM_setValue
 // @grant GM_getValue
+// @grant GM_addValueChangeListener
+// @grant GM_removeValueChangeListener
+// @grant GM_deleteValue
 // @grant GM_log
 // @grant GM_openInTab
 // @grant GM_cookie

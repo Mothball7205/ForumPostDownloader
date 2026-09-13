@@ -151,7 +151,7 @@ const isTurboUrl = u => /turbocdn\.st|turbo\.cr|turbovid\.cr/i.test(String(u || 
 const isImagebamCdnUrl = u => /https?:\/\/(?:images|thumbs)\d+\.imagebam\.com\//i.test(String(u || ''));
 const imagebamRefererForCdn = u => {
   try {
-    const uu = new URL(String(u || ''), typeof location !== 'undefined' && location.origin ? location.origin : '');
+    const uu = new URL(String(u || ''), typeof location !== 'undefined' && location.origin ? location.origin : undefined);
     const base = (uu.pathname || '').split('/').pop() || '';
     const id = base.replace(/\.[a-z0-9]+$/i, '');
     return id ? `https://www.imagebam.com/view/${id}` : 'https://www.imagebam.com/';

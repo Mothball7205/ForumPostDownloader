@@ -94,7 +94,7 @@ const createDownloadMetadataReader = () => {
 
       // Fallback HEAD (works for GoFile store links and Pixeldrain list ZIPs)
       const nameHasExt = /\.[A-Za-z0-9]{1,8}$/.test(String(meta.filename || ''));
-      const isFilester = /(?:^https?:\/\/)?(?:cache\d+\.)?filester\.(me|sh|si|gg)\/v\//i.test(String(url || ''));
+      const isFilester = isFilesterUrl(url);
       const needHead = !!(isGoFile || isPixeldrain || (!isFilester && (!meta.size || !meta.filename || !nameHasExt)));
       if (needHead) {
         const hRes = await gmDownloadHead(url);

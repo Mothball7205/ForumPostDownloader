@@ -4,6 +4,7 @@ import vm from 'node:vm';
 
 const utilsSource = readFileSync(join('src', 'download-utils.js'), 'utf8');
 const namingSource = readFileSync(join('src', 'download', 'naming.js'), 'utf8');
+const cachesSource = readFileSync(join('src', 'host-caches.js'), 'utf8');
 
 const h = {
   re: {
@@ -25,19 +26,20 @@ const h = {
 
 const sandbox = {
   h,
+  URL,
   settings: { naming: { allowEmojis: false, invalidCharSubstitute: '-' } },
-  bunkrNameByUrl: new Map(),
-  gofileNameById: new Map(),
-  gofileNameByUrl: new Map(),
-  cyberdropNameBySlug: new Map(),
-  cyberdropNameByUrl: new Map(),
-  filesterNameBySlug: new Map(),
-  filesterNameByUrl: new Map(),
-  filesterSlugByUrl: new Map(),
   xfpdLooksLikeCfFilenameHint: () => false,
 };
 vm.createContext(sandbox);
-vm.runInContext(utilsSource + '\n' + namingSource + '\nglobalThis.__planner = createDownloadNamePlanner;', sandbox);
+vm.runInContext(
+  cachesSource +
+    '\n' +
+    utilsSource +
+    '\n' +
+    namingSource +
+    '\nglobalThis.__planner = createDownloadNamePlanner; globalThis.bunkrNameByUrl = bunkrNameByUrl;',
+  sandbox,
+);
 const createDownloadNamePlanner = sandbox.__planner;
 
 const plannerFor = (overrides = {}) =>

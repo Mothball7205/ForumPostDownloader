@@ -4,6 +4,7 @@ import vm from 'node:vm';
 
 const utilsSource = readFileSync(join('src', 'download-utils.js'), 'utf8');
 const transferSource = readFileSync(join('src', 'download', 'transfer.js'), 'utf8');
+const cachesSource = readFileSync(join('src', 'host-caches.js'), 'utf8');
 
 const h = {
   limit: (s, maxLength = 80) => {
@@ -14,7 +15,7 @@ const h = {
 
 const sandbox = { h, URL };
 vm.createContext(sandbox);
-vm.runInContext(utilsSource + '\n' + transferSource + '\nglobalThis.__classify = classifyDownloadAttempt;', sandbox);
+vm.runInContext(cachesSource + '\n' + utilsSource + '\n' + transferSource + '\nglobalThis.__classify = classifyDownloadAttempt;', sandbox);
 const classifyDownloadAttempt = sandbox.__classify;
 
 describe('classifyDownloadAttempt', () => {

@@ -12,65 +12,41 @@ resolvers.push([[/kemono.cr\/data/], url => url]);
 resolvers.push([
   [/goonbox\.cr\/img\//],
   async (url, http) => {
-    const id = url.split('/').pop().split('?')[0];
-    const fallback = goonboxThumbByUrl.get(url.replace(/\?.*/, '').replace(/\/$/, '')) || null;
+    const page = goonboxPageUrl(url);
+    if (!page) return null;
+    const id = page.pathname.split('/').pop();
+    const data = await goonboxApiJson(http, `/api/images/${id}`, page.href);
 
-    const { source } = await http.get(`https://goonbox.cr/api/images/${id}`, {}, { Referer: url, Accept: 'application/json' }, 'text');
-
-    let originalUrl = null;
-    if (source) {
-      try {
-        originalUrl = JSON.parse(source)?.image?.original_url || null;
-      } catch (e) {}
+    // Only inspect the image and known response wrappers, not related images elsewhere.
+    // Preserve the original even if a CDN refuses HEAD/range probes; a failed download
+    // is preferable to silently substituting a medium-resolution thumbnail.
+    for (const image of [data?.image, data?.data?.image, data?.data, data]) {
+      const original = goonboxOriginalUrl(image);
+      if (original) return original;
     }
-
-    if (!originalUrl) return fallback;
-
-    // Post-migration, some "original_url" targets 404 even though the medium-res thumbnail
-    // on the same cuckcapital.cr host still exists. Verify before trusting it.
-    try {
-      const check = await http.base('HEAD', originalUrl, {}, { Referer: url }, null, 'text');
-      if (!check.status || check.status >= 400) {
-        return fallback || originalUrl;
-      }
-    } catch (e) {
-      return fallback || originalUrl;
-    }
-
-    return originalUrl;
+    return null;
   },
 ]);
 
 resolvers.push([
   [/goonbox\.cr\/a\//],
   async (url, http) => {
-    const albumSlug = url.replace(/\?.*/, '').split('/').filter(Boolean).pop();
-
-    const fetchPage = async page => {
-      const { source } = await http.get(
-        `https://goonbox.cr/api/albums/${albumSlug}/images?page=${page}`,
-        {},
-        { Referer: url, Accept: 'application/json' },
-        'text',
-      );
-      if (!source) return null;
-      try {
-        return JSON.parse(source);
-      } catch (e) {
-        return null;
-      }
-    };
+    const pageUrl = goonboxPageUrl(url);
+    if (!pageUrl) return null;
+    const albumSlug = pageUrl.pathname.split('/').pop();
+    const fetchPage = page => goonboxApiJson(http, `/api/albums/${albumSlug}/images?page=${page}`, pageUrl.href);
 
     const first = await fetchPage(1);
     if (!first || !h.isArray(first.images)) return null;
 
-    const resolved = first.images.map(img => img.original_url).filter(Boolean);
-    const lastPage = first.pagination?.last_page || 1;
+    const resolved = first.images.map(goonboxOriginalUrl).filter(Boolean);
+    const lastPage = Number(first.pagination?.last_page || 1);
+    if (!Number.isInteger(lastPage) || lastPage < 1 || lastPage > 9999) return null;
 
     for (let page = 2; page <= lastPage; page++) {
       const data = await fetchPage(page);
       if (data && h.isArray(data.images)) {
-        resolved.push(...data.images.map(img => img.original_url).filter(Boolean));
+        resolved.push(...data.images.map(goonboxOriginalUrl).filter(Boolean));
       }
     }
 

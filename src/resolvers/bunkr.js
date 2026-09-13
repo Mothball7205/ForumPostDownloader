@@ -6,10 +6,14 @@ resolvers.push([
   async (url, http) => {
     try {
       const cleanUrl = String(url || '').split('#')[0];
+      const isLegacyCdn = /^https?:\/\/(?:cdn\d*|stream)\.bunkrr?r?\./i.test(cleanUrl);
 
-      // If this already looks like a direct media file URL, keep it (don't call /api/vs).
-      // (CDN links usually include the real filename already.)
-      if (/\.(?:mp4|m4v|webm|mov|mkv|jpg|jpeg|png|gif|webp|zip|rar|7z|pdf)(?:$|\?)/i.test(cleanUrl) && !/\/(?:v|f|d)\//i.test(cleanUrl)) {
+      // Legacy CDN URLs redirect to view pages and still need metadata/signing.
+      if (
+        !isLegacyCdn &&
+        /\.(?:mp4|m4v|webm|mov|mkv|jpg|jpeg|png|gif|webp|zip|rar|7z|pdf)(?:$|\?)/i.test(cleanUrl) &&
+        !/\/(?:v|f|d)\//i.test(cleanUrl)
+      ) {
         return cleanUrl;
       }
 
@@ -29,7 +33,9 @@ resolvers.push([
           String(s || '')
             .split('#')[0]
             .split('?')[0];
-        const bases = xfpdBunkrFilterBases([origin, 'https://bunkr.pk', 'https://bunkr.cr']);
+        const bases = xfpdBunkrFilterBases(
+          isLegacyCdn ? ['https://bunkr.cr', 'https://bunkr.pk'] : [origin, 'https://bunkr.pk', 'https://bunkr.cr'],
+        );
 
         for (const base of bases) {
           const base0 = String(base || '').replace(/\/$/, '');
@@ -141,10 +147,10 @@ resolvers.push([
       };
 
       const finalURL = await tryNewApi();
-      return finalURL || cleanUrl;
+      return finalURL;
     } catch (error) {
       console.error(error?.message || error);
-      return url;
+      return null;
     }
   },
 ]);

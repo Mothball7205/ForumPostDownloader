@@ -49,9 +49,7 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
       String((resource && resource.host && resource.host.name) || '').toLowerCase() === 'bunkr' ||
       /bunkr/i.test(String(url || '')) ||
       /bunkr/i.test(String((resource && resource.original) || ''));
-    const isFilester =
-      String((resource && resource.host && resource.host.name) || '').toLowerCase() === 'filester' ||
-      /(?:^|\.)filester\.(me|sh|si|gg)/i.test(String(url || ''));
+    const isFilester = String((resource && resource.host && resource.host.name) || '').toLowerCase() === 'filester' || isFilesterUrl(url);
 
     // Try to reuse the existing GoFile filename hints, if available.
     let filename = filenames.find(f => f.url === url);
@@ -333,7 +331,7 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
     }
 
     // Filester: prefer the real filename (from view page / API hints). Only fall back to a safe slug-based name when needed.
-    if (/(?:^|https?:\/\/)(?:cache\d+\.)?filester\.(me|sh|si|gg)\/(?:d|v)\//i.test(String(url || ''))) {
+    if (isFilesterUrl(url)) {
       try {
         let slug0 = '';
         const m = /https?:\/\/(?:www\.)?filester\.(me|sh|si|gg)\/d\/([^\/?#]+)/i.exec(String((resource && resource.original) || ''));

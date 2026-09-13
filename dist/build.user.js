@@ -4,7 +4,7 @@
 // @namespace https://github.com/SkyCloudDev
 // @author SkyCloudDev
 // @description Downloads images and videos from posts
-// @version 4.1.0
+// @version 4.2.0
 // @updateURL https://github.com/Mothball7205/ForumPostDownloader/raw/main/dist/build.user.js
 // @downloadURL https://github.com/Mothball7205/ForumPostDownloader/raw/main/dist/build.user.js
 // @icon https://simp4.cuckcapital.cr/simpcityIcon192.png
@@ -16,6 +16,10 @@
 // @match https://simpcity.rs/threads/*
 // @match https://simpcity.ax/threads/*
 // @match https://gofile.io/*
+// @match https://goonbox.cr/img/*
+// @match https://goonbox.cr/a/*
+// @match https://www.goonbox.cr/img/*
+// @match https://www.goonbox.cr/a/*
 // @require https://unpkg.com/@popperjs/core@2
 // @require https://unpkg.com/tippy.js@6
 // @require https://unpkg.com/file-saver@2.0.4/dist/FileSaver.min.js
@@ -125,6 +129,9 @@
 // @grant GM_download
 // @grant GM_setValue
 // @grant GM_getValue
+// @grant GM_addValueChangeListener
+// @grant GM_removeValueChangeListener
+// @grant GM_deleteValue
 // @grant GM_log
 // @grant GM_openInTab
 // @grant GM_cookie
@@ -414,38 +421,130 @@ const filesterSizeBySlug = new Map();
 const filesterSizeByUrl = new Map();
 const filesterSlugByUrl = new Map();
 const filesterRefByUrl = new Map();
+const filesterV2Urls = new Set();
 
-// Filester: cache candidate fallback (some tokens are served from different cacheN hosts; cache6 is common but not guaranteed)
+// Legacy /v/ streams can move between CDN hosts. V2 tokens are bound to their
+// API-selected server and must never enter this candidate ladder.
 const filesterCandidatesByToken = new Map(); // token -> string[]
 const filesterTriedByToken = new Map(); // token -> Set<string> of tried candidate URLs
 const filesterRetryAttemptsByKey = new Map(); // token/url -> number of retries on transient HTTP errors (429/400/etc)
 
-function filesterTokenFromVUrl(u) {
+const FILESTER_STREAM_HOSTS = [
+  'https://fsc1.cdn.cr',
+  'https://fsc2.cdn.cr',
+  'https://fsc3.cdn.cr',
+  'https://cache2.filester.me',
+  'https://cache3.filester.me',
+  'https://cache4.filester.me',
+  'https://cache5.filester.me',
+  'https://cache7.filester.me',
+  'https://cache8.filester.me',
+  'https://cache6.filester.me',
+  'https://cache1.filester.me',
+];
+const FILESTER_PROBE_TIMEOUT_MS = 8000;
+const FILESTER_PROBE_BUDGET_MS = 25000;
+const FILESTER_API_TIMEOUT_MS = 20000;
+
+function filesterTokenFromVUrl(url) {
   try {
-    const m = /\/v\/([^\/?#]+)/i.exec(String(u || ''));
-    return m && m[1] ? String(m[1]) : '';
+    if (filesterV2Urls.has(String(url))) return '';
+    const match = /^\/v\/([^/]+)\/?$/i.exec(new URL(String(url)).pathname);
+    return match ? match[1] : '';
   } catch (e) {
     return '';
   }
 }
 
-function filesterBuildCandidates(token) {
-  const t = String(token || '').trim();
-  if (!t) return [];
-  const order = [6, 1, 2, 3, 4, 5, 7, 8];
-  const out = [];
-  for (const n of order) out.push(`https://cache${n}.filester.me/v/${t}`);
-  out.push(`https://filester.me/v/${t}`);
-  return out;
+function filesterBuildCandidates(token, apiBase = 'https://filester.me') {
+  const value = String(token || '').trim();
+  if (!value) return [];
+  return [...FILESTER_STREAM_HOSTS, String(apiBase).replace(/\/+$/, '')].map(base => `${base}/v/${value}`);
+}
+
+function filesterParseFileUrl(url) {
+  try {
+    let value = String(url || '').trim();
+    if (value.startsWith('//')) value = `https:${value}`;
+    else if (!/^https?:\/\//i.test(value)) value = `https://${value}`;
+    const parsed = new URL(value);
+    if (!/^(?:[a-z0-9-]+\.)*filester\.(me|sh|si|gg)$/i.test(parsed.hostname)) return null;
+    const match = /^\/d\/([^/]+)\/?$/i.exec(parsed.pathname);
+    if (!match) return null;
+    return { slug: match[1], apiBase: `https://${parsed.hostname}`, url: parsed.href };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Recognise API-issued streams by provenance, not a fixed CDN hostname list.
+function isFilesterUrl(url) {
+  const value = String(url || '');
+  return (
+    filesterSlugByUrl.has(value) ||
+    /^(?:https?:)?\/\/(?:[a-z0-9-]+\.)*filester\.(me|sh|si|gg)\/(?:d|v)\//i.test(value) ||
+    !!filesterParseFileUrl(value)
+  );
+}
+
+// Shared by single links and album items, which obtain their short-lived token
+// only when downloading. The retired v1 API returns dead links even on HTTP 200.
+async function filesterResolveV2(http, apiBase, slug, progressCB) {
+  const base = String(apiBase || 'https://filester.me').replace(/\/+$/, '');
+  const value = String(slug || '').trim();
+  if (!value) return null;
+  const ref = `${base}/d/${value}`;
+
+  try {
+    if (typeof progressCB === 'function') progressCB('[Filester] Requesting download token (v2)...');
+    const response = await http.post(
+      `${base}/v2/api/public/download`,
+      JSON.stringify({ file_slug: value }),
+      {},
+      {
+        Accept: 'application/json, text/plain, */*',
+        'Content-Type': 'application/json;charset=UTF-8',
+        Origin: base,
+        Referer: ref,
+        __xfpd_withCredentials: true,
+      },
+      'text',
+      FILESTER_API_TIMEOUT_MS,
+    );
+    if (!(response?.status >= 200 && response.status < 300)) return null;
+    const data = JSON.parse(response.source);
+    const server = typeof data?.server === 'string' ? data.server.replace(/\/+$/, '') : '';
+    const file = typeof data?.file === 'string' ? data.file : '';
+    const token = typeof data?.token === 'string' ? data.token : '';
+    if (!server || !file || !token) return null;
+    const serverUrl = new URL(server);
+    if (!/^https?:$/.test(serverUrl.protocol) || serverUrl.username || serverUrl.password || serverUrl.search || serverUrl.hash) {
+      return null;
+    }
+
+    const name =
+      (typeof data.name === 'string' && data.name.trim()) ||
+      filesterNameBySlug.get(value) ||
+      `Filester_${value}${(/\.[A-Za-z0-9]{1,8}$/.exec(file) || [''])[0]}`;
+    const filePath = file.split('/').map(encodeURIComponent).join('/');
+    const streamUrl = `${server}/v2/${filePath}?token=${encodeURIComponent(token)}&download=true&n=${encodeURIComponent(name)}`;
+    filesterV2Urls.add(streamUrl);
+    filesterNameBySlug.set(value, name);
+    for (const key of [ref, streamUrl]) {
+      filesterSlugByUrl.set(key, value);
+      filesterRefByUrl.set(key, ref);
+      filesterNameByUrl.set(key, name);
+      const size = filesterSizeBySlug.get(value);
+      if (size > 0) filesterSizeByUrl.set(key, size);
+    }
+    return { url: streamUrl, name, ref };
+  } catch (e) {
+    return null;
+  }
 }
 
 // Bunkr filename hints (from /v/ pages)
 const bunkrNameByUrl = new Map();
-
-// Goonbox: embedded medium-res thumbnail per /img/ link, used as a download fallback when the
-// API's original_url 404s (post-migration, some originals are missing but the .md. thumbnail --
-// also hosted on cuckcapital.cr -- still exists).
-const goonboxThumbByUrl = new Map();
 
 // Bunkr/Cloudflare: best-effort warm-up to let the browser complete a JS-only CF interstitial ("Just a moment...").
 // NOTE: This does NOT solve interactive Turnstile/CAPTCHA challenges; in that case you still need to do it manually.
@@ -982,9 +1081,10 @@ const h = {
      * @param headers
      * @param data
      * @param responseType
+     * @param timeoutMs
      * @returns {Promise<unknown>}
      */
-    base: (method, url, callbacks = {}, headers = {}, data = {}, responseType = 'document') => {
+    base: (method, url, callbacks = {}, headers = {}, data = {}, responseType = 'document', timeoutMs = 0) => {
       return h.promise((resolve, reject) => {
         let responseHeaders = null;
         let request = null;
@@ -1010,6 +1110,7 @@ const h = {
           data,
           headers: hdrs,
           ...(withCredentials ? { withCredentials: true, anonymous: false } : {}),
+          timeout: timeoutMs,
           onreadystatechange: response => {
             if (response.readyState === 2) {
               responseHeaders = response.responseHeaders;
@@ -1041,6 +1142,11 @@ const h = {
             callbacks && callbacks.onError && callbacks.onError(error);
             reject(error);
           },
+          ontimeout: () => {
+            const error = new Error(`Request timed out: ${method} ${url}`);
+            callbacks?.onError?.(error);
+            reject(error);
+          },
         });
       });
     },
@@ -1051,8 +1157,8 @@ const h = {
      * @param responseType
      * @returns {Promise<unknown>}
      */
-    get: (url, callbacks = {}, headers = {}, responseType = 'document') => {
-      return h.promise(resolve => resolve(h.http.base('GET', url, callbacks, headers, null, responseType)));
+    get: (url, callbacks = {}, headers = {}, responseType = 'document', timeoutMs = 0) => {
+      return h.http.base('GET', url, callbacks, headers, null, responseType, timeoutMs);
     },
     /**
      * @param url
@@ -1061,8 +1167,8 @@ const h = {
      * @param headers
      * @returns {Promise<unknown>}
      */
-    post: (url, data = {}, callbacks = {}, headers = {}) => {
-      return h.promise(resolve => resolve(h.http.base('POST', url, callbacks, headers, data)));
+    post: (url, data = {}, callbacks = {}, headers = {}, responseType = 'document', timeoutMs = 0) => {
+      return h.http.base('POST', url, callbacks, headers, data, responseType, timeoutMs);
     },
   },
   re: {
@@ -1139,6 +1245,281 @@ const h = {
     },
   },
 };
+
+const GOONBOX_ORIGIN = 'https://goonbox.cr';
+const GOONBOX_API_TIMEOUT_MS = 20000;
+const GOONBOX_READY_TIMEOUT_MS = 20000;
+const GOONBOX_REQUEST_TIMEOUT_MS = 25000;
+const GOONBOX_IDLE_MS = 5000;
+const GOONBOX_MARKER = 'xfpd_gbx';
+
+function goonboxPageUrl(value) {
+  try {
+    const url = new URL(value);
+    if (!/^https?:$/.test(url.protocol) || !/^(?:www\.)?goonbox\.cr$/.test(url.hostname)) return null;
+    if (url.username || url.password || url.port) return null;
+    if (!/^\/(?:img\/[A-Za-z0-9_-]{1,64}|a\/[A-Za-z0-9._~-]{1,128})\/?$/.test(url.pathname)) return null;
+    return new URL(url.pathname.replace(/\/$/, ''), GOONBOX_ORIGIN);
+  } catch (e) {
+    return null;
+  }
+}
+
+function goonboxApiPathAllowed(path) {
+  if (typeof path !== 'string') return false;
+  if (!/^\/api\/(?:images\/[A-Za-z0-9_-]{1,64}|albums\/[A-Za-z0-9._~-]{1,128}\/images\?page=[1-9]\d{0,3})$/.test(path)) return false;
+  const url = new URL(path, GOONBOX_ORIGIN);
+  return url.pathname + url.search === path;
+}
+
+function goonboxParseJson(source) {
+  try {
+    const data = JSON.parse(source);
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function goonboxOriginalUrl(image) {
+  for (const value of [image?.original_url, image?.originalUrl, image?.original]) {
+    if (typeof value !== 'string') continue;
+    try {
+      const url = new URL(value.trim());
+      if (/^https?:$/.test(url.protocol) && !url.username && !url.password) return value.trim();
+    } catch (e) {}
+  }
+  return null;
+}
+
+let goonboxBridgeSession = null;
+let goonboxBridgeChain = Promise.resolve();
+
+function goonboxBridgeClose(session) {
+  if (!session || session.closed) return;
+  session.closed = true;
+  clearTimeout(session.idleTimer);
+  session.pending?.finish(null);
+  try {
+    GM_removeValueChangeListener(session.listener);
+  } catch (e) {}
+  // Deleting the mailbox also tells the helper to abort any outstanding fetch.
+  for (const suffix of ['request', 'response', 'owner']) {
+    try {
+      GM_deleteValue(`${session.key}:${suffix}`);
+    } catch (e) {}
+  }
+  xfpdCloseTabHandle(session.tab);
+  if (goonboxBridgeSession === session) goonboxBridgeSession = null;
+}
+
+function goonboxBridgeWait(session, type, timeoutMs, id = '', path = '') {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => finish(null), Math.max(0, timeoutMs));
+    const finish = value => {
+      if (session.pending?.finish !== finish) return;
+      clearTimeout(timer);
+      session.pending = null;
+      resolve(value);
+    };
+    session.pending = { type, id, path, finish };
+  });
+}
+
+function goonboxBridgeOpen(pageUrl, deadline) {
+  const page = goonboxPageUrl(pageUrl);
+  if (
+    !page ||
+    typeof GM_addValueChangeListener !== 'function' ||
+    typeof GM_removeValueChangeListener !== 'function' ||
+    typeof GM_deleteValue !== 'function' ||
+    typeof GM_setValue !== 'function' ||
+    typeof GM_openInTab !== 'function'
+  )
+    return null;
+
+  const id = crypto.randomUUID();
+  const session = { id, key: `xfpd_gbx_${id}`, tab: null, listener: null, pending: null, idleTimer: null, closed: false };
+  goonboxBridgeSession = session;
+  session.ready = goonboxBridgeWait(session, 'ready', Math.min(GOONBOX_READY_TIMEOUT_MS, deadline - Date.now()));
+  try {
+    // Subscribe before opening: the helper's first ready event must not race its listener.
+    session.listener = GM_addValueChangeListener(`${session.key}:response`, (name, oldValue, value) => {
+      if (session.closed || value?.session !== id) return;
+      if (value.type === 'closed') {
+        goonboxBridgeClose(session);
+        return;
+      }
+      const pending = session.pending;
+      if (!pending || value.type !== pending.type) return;
+      if (value.type === 'response' && (value.id !== pending.id || value.path !== pending.path)) return;
+      pending.finish(value);
+    });
+    GM_setValue(`${session.key}:owner`, { session: id, page: page.pathname, expires: deadline });
+    page.searchParams.set(GOONBOX_MARKER, id);
+    session.tab = GM_openInTab(page.href, { active: false, insert: true, setParent: true });
+    if (!session.tab) goonboxBridgeClose(session);
+    else if (typeof session.tab.then === 'function') session.tab.catch(() => goonboxBridgeClose(session));
+  } catch (e) {
+    goonboxBridgeClose(session);
+  }
+  return session;
+}
+
+function goonboxBridgeGet(path, pageUrl) {
+  if (!goonboxApiPathAllowed(path) || !goonboxPageUrl(pageUrl)) return Promise.resolve(null);
+  // Includes time spent queued behind other requests in this forum tab.
+  const deadline = Date.now() + GOONBOX_READY_TIMEOUT_MS + GOONBOX_REQUEST_TIMEOUT_MS;
+  const run = async () => {
+    if (Date.now() >= deadline) return null;
+    const session = goonboxBridgeSession || goonboxBridgeOpen(pageUrl, deadline);
+    if (!session) return null;
+    clearTimeout(session.idleTimer);
+    try {
+      if (!(await session.ready) || session.closed || Date.now() >= deadline) {
+        goonboxBridgeClose(session);
+        return null;
+      }
+      const id = crypto.randomUUID();
+      const expires = Math.min(deadline, Date.now() + GOONBOX_REQUEST_TIMEOUT_MS);
+      const response = goonboxBridgeWait(session, 'response', expires - Date.now(), id, path);
+      GM_setValue(`${session.key}:request`, { session: session.id, id, path, expires });
+      const result = await response;
+      if (!result) goonboxBridgeClose(session);
+      return result;
+    } catch (e) {
+      goonboxBridgeClose(session);
+      return null;
+    } finally {
+      // Runs only after the request settles. A queued request cancels this timer before waiting.
+      if (!session.closed) session.idleTimer = setTimeout(() => goonboxBridgeClose(session), GOONBOX_IDLE_MS);
+    }
+  };
+  const result = goonboxBridgeChain.then(run, run);
+  goonboxBridgeChain = result.catch(() => null);
+  return result;
+}
+
+async function goonboxApiJson(http, path, pageUrl) {
+  const page = goonboxPageUrl(pageUrl);
+  if (!page || !goonboxApiPathAllowed(path)) return null;
+  try {
+    const response = await http.get(
+      `${GOONBOX_ORIGIN}${path}`,
+      {},
+      { Referer: page.href, Accept: 'application/json' },
+      'text',
+      GOONBOX_API_TIMEOUT_MS,
+    );
+    if (response?.status >= 200 && response.status < 300) {
+      const data = goonboxParseJson(response.source);
+      if (data) return data;
+    }
+  } catch (e) {}
+  // Firefox may partition GM request cookies under the forum origin. Fetching in a real
+  // Goonbox tab uses its first-party cookies instead; no cookies are copied across origins.
+  const response = await goonboxBridgeGet(path, page.href);
+  return response?.status >= 200 && response.status < 300 ? goonboxParseJson(response.body) : null;
+}
+
+function goonboxBridgeServe() {
+  if (window.top !== window.self || location.protocol !== 'https:') return;
+  const page = goonboxPageUrl(location.href);
+  const id = new URLSearchParams(location.search).get(GOONBOX_MARKER);
+  if (!page || !/^[a-f0-9-]{36}$/.test(id || '')) return;
+  if (
+    typeof GM_getValue !== 'function' ||
+    typeof GM_setValue !== 'function' ||
+    typeof GM_addValueChangeListener !== 'function' ||
+    typeof GM_removeValueChangeListener !== 'function'
+  )
+    return;
+  const key = `xfpd_gbx_${id}`;
+  const owner = GM_getValue(`${key}:owner`, null);
+  if (owner?.session !== id || owner.page !== page.pathname || !Number.isFinite(owner.expires) || owner.expires <= Date.now()) return;
+
+  let closed = false;
+  let busy = false;
+  let lastId = '';
+  let controller = null;
+  let listener = null;
+  let idleTimer = null;
+  const reply = value => GM_setValue(`${key}:response`, { session: id, ...value });
+  const stop = (notify = true) => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(idleTimer);
+    controller?.abort();
+    try {
+      GM_removeValueChangeListener(listener);
+    } catch (e) {}
+    if (notify) {
+      try {
+        reply({ type: 'closed' });
+      } catch (e) {}
+    }
+  };
+  const armIdle = () => {
+    clearTimeout(idleTimer);
+    // A requester crash must not leave an authenticated bridge listening indefinitely.
+    idleTimer = setTimeout(() => {
+      stop();
+      window.close();
+    }, GOONBOX_READY_TIMEOUT_MS + GOONBOX_REQUEST_TIMEOUT_MS);
+  };
+  const handle = async request => {
+    if (closed || busy || request?.session !== id || typeof request.id !== 'string' || request.id === lastId) return;
+    if (!/^[a-f0-9-]{36}$/.test(request.id) || !goonboxApiPathAllowed(request.path)) return;
+    if (!Number.isFinite(request.expires) || request.expires <= Date.now() || request.expires > Date.now() + GOONBOX_REQUEST_TIMEOUT_MS)
+      return;
+    lastId = request.id;
+    busy = true;
+    clearTimeout(idleTimer);
+    controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(GOONBOX_API_TIMEOUT_MS, request.expires - Date.now()));
+    let status = 0;
+    let body = '';
+    try {
+      // Use this tab's exact origin (including a www redirect); never follow API redirects
+      // or accept caller-supplied URLs, methods, headers, or credentials.
+      const response = await fetch(`${location.origin}${request.path}`, {
+        credentials: 'same-origin',
+        mode: 'same-origin',
+        redirect: 'error',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      status = response.status;
+      body = await response.text();
+    } catch (e) {
+      status = 0;
+    } finally {
+      clearTimeout(timer);
+      controller = null;
+      busy = false;
+    }
+    if (closed) return;
+    try {
+      reply({ type: 'response', id: request.id, path: request.path, status, body });
+    } catch (e) {}
+    armIdle();
+  };
+
+  try {
+    // Event values, not cross-tab polling: Tampermonkey's GM_getValue cache can be stale.
+    listener = GM_addValueChangeListener(`${key}:request`, (name, oldValue, value) => {
+      if (value == null) stop(false);
+      else void handle(value);
+    });
+    window.addEventListener('pagehide', stop, { once: true });
+    armIdle();
+    reply({ type: 'ready' });
+  } catch (e) {
+    stop();
+  }
+}
+
+window.addEventListener('pagehide', () => goonboxBridgeClose(goonboxBridgeSession));
 
 Array.prototype.unique = function (cb) {
   return h.unique(this, cb);
@@ -2411,65 +2792,41 @@ resolvers.push([[/kemono.cr\/data/], url => url]);
 resolvers.push([
   [/goonbox\.cr\/img\//],
   async (url, http) => {
-    const id = url.split('/').pop().split('?')[0];
-    const fallback = goonboxThumbByUrl.get(url.replace(/\?.*/, '').replace(/\/$/, '')) || null;
+    const page = goonboxPageUrl(url);
+    if (!page) return null;
+    const id = page.pathname.split('/').pop();
+    const data = await goonboxApiJson(http, `/api/images/${id}`, page.href);
 
-    const { source } = await http.get(`https://goonbox.cr/api/images/${id}`, {}, { Referer: url, Accept: 'application/json' }, 'text');
-
-    let originalUrl = null;
-    if (source) {
-      try {
-        originalUrl = JSON.parse(source)?.image?.original_url || null;
-      } catch (e) {}
+    // Only inspect the image and known response wrappers, not related images elsewhere.
+    // Preserve the original even if a CDN refuses HEAD/range probes; a failed download
+    // is preferable to silently substituting a medium-resolution thumbnail.
+    for (const image of [data?.image, data?.data?.image, data?.data, data]) {
+      const original = goonboxOriginalUrl(image);
+      if (original) return original;
     }
-
-    if (!originalUrl) return fallback;
-
-    // Post-migration, some "original_url" targets 404 even though the medium-res thumbnail
-    // on the same cuckcapital.cr host still exists. Verify before trusting it.
-    try {
-      const check = await http.base('HEAD', originalUrl, {}, { Referer: url }, null, 'text');
-      if (!check.status || check.status >= 400) {
-        return fallback || originalUrl;
-      }
-    } catch (e) {
-      return fallback || originalUrl;
-    }
-
-    return originalUrl;
+    return null;
   },
 ]);
 
 resolvers.push([
   [/goonbox\.cr\/a\//],
   async (url, http) => {
-    const albumSlug = url.replace(/\?.*/, '').split('/').filter(Boolean).pop();
-
-    const fetchPage = async page => {
-      const { source } = await http.get(
-        `https://goonbox.cr/api/albums/${albumSlug}/images?page=${page}`,
-        {},
-        { Referer: url, Accept: 'application/json' },
-        'text',
-      );
-      if (!source) return null;
-      try {
-        return JSON.parse(source);
-      } catch (e) {
-        return null;
-      }
-    };
+    const pageUrl = goonboxPageUrl(url);
+    if (!pageUrl) return null;
+    const albumSlug = pageUrl.pathname.split('/').pop();
+    const fetchPage = page => goonboxApiJson(http, `/api/albums/${albumSlug}/images?page=${page}`, pageUrl.href);
 
     const first = await fetchPage(1);
     if (!first || !h.isArray(first.images)) return null;
 
-    const resolved = first.images.map(img => img.original_url).filter(Boolean);
-    const lastPage = first.pagination?.last_page || 1;
+    const resolved = first.images.map(goonboxOriginalUrl).filter(Boolean);
+    const lastPage = Number(first.pagination?.last_page || 1);
+    if (!Number.isInteger(lastPage) || lastPage < 1 || lastPage > 9999) return null;
 
     for (let page = 2; page <= lastPage; page++) {
       const data = await fetchPage(page);
       if (data && h.isArray(data.images)) {
-        resolved.push(...data.images.map(img => img.original_url).filter(Boolean));
+        resolved.push(...data.images.map(goonboxOriginalUrl).filter(Boolean));
       }
     }
 
@@ -2684,10 +3041,14 @@ resolvers.push([
   async (url, http) => {
     try {
       const cleanUrl = String(url || '').split('#')[0];
+      const isLegacyCdn = /^https?:\/\/(?:cdn\d*|stream)\.bunkrr?r?\./i.test(cleanUrl);
 
-      // If this already looks like a direct media file URL, keep it (don't call /api/vs).
-      // (CDN links usually include the real filename already.)
-      if (/\.(?:mp4|m4v|webm|mov|mkv|jpg|jpeg|png|gif|webp|zip|rar|7z|pdf)(?:$|\?)/i.test(cleanUrl) && !/\/(?:v|f|d)\//i.test(cleanUrl)) {
+      // Legacy CDN URLs redirect to view pages and still need metadata/signing.
+      if (
+        !isLegacyCdn &&
+        /\.(?:mp4|m4v|webm|mov|mkv|jpg|jpeg|png|gif|webp|zip|rar|7z|pdf)(?:$|\?)/i.test(cleanUrl) &&
+        !/\/(?:v|f|d)\//i.test(cleanUrl)
+      ) {
         return cleanUrl;
       }
 
@@ -2707,7 +3068,9 @@ resolvers.push([
           String(s || '')
             .split('#')[0]
             .split('?')[0];
-        const bases = xfpdBunkrFilterBases([origin, 'https://bunkr.pk', 'https://bunkr.cr']);
+        const bases = xfpdBunkrFilterBases(
+          isLegacyCdn ? ['https://bunkr.cr', 'https://bunkr.pk'] : [origin, 'https://bunkr.pk', 'https://bunkr.cr'],
+        );
 
         for (const base of bases) {
           const base0 = String(base || '').replace(/\/$/, '');
@@ -2819,10 +3182,10 @@ resolvers.push([
       };
 
       const finalURL = await tryNewApi();
-      return finalURL || cleanUrl;
+      return finalURL;
     } catch (error) {
       console.error(error?.message || error);
-      return url;
+      return null;
     }
   },
 ]);
@@ -3260,17 +3623,15 @@ resolvers.push([
 
     // GoFile no longer uses the static appdata.wt from config.js for /contents.
     // The website now derives a per-request X-Website-Token from the account token
-    // via generateWT() in https://gofile.io/dist/js/wt.obf.js, i.e.:
+    // via generateWT() in https://gofile.io/js/wt.obf.js, i.e.:
     //   WT = sha256(navigator.userAgent + "::" + navigator.language + "::" + token + "::<time>::<salt>")
     // <time> is NOT a static value -- it's Math.floor(Date.now() / 1000 / 14400) (a
     // 4-hour bucket), recomputed live inside generateWT() itself. <salt> is the one
     // actual fixed constant, which can still change whenever GoFile updates the file.
-    // We fetch the script live, eval it in a scoped Function (it only reads navigator,
-    // and the function declaration stays local, not leaked to global), and cache the
-    // source for a day -- safe because we call the eval'd generateWT() fresh on every
-    // request, so Date.now() is always evaluated at call time, not baked in when the
-    // source was cached. WT must be computed with the same UA/language the request is
-    // sent with; the language is also echoed back to the server via the X-BL header.
+    // We trust GoFile's script to compute this token, as its website does. Function
+    // keeps the declaration local but is not a sandbox. Only fetch website scripts
+    // from GoFile itself, and cache source rather than a time-dependent token.
+    // WT must use the same UA/language as the request; X-BL echoes the language.
     let cachedGenerateWT = null;
 
     const getGenerateWT = async (force = false) => {
@@ -3281,7 +3642,7 @@ resolvers.push([
       let src = !force && cached && cached.src && cached.ts && now - cached.ts < WT_MAX_AGE_MS ? cached.src : null;
 
       if (!src) {
-        const { source } = await gmReq('GET', 'https://gofile.io/dist/js/wt.obf.js', null, {}, 'text');
+        const { source } = await gmReq('GET', 'https://gofile.io/js/wt.obf.js', null, {}, 'text');
         src = source || '';
         if (!src || !/generateWT/.test(src)) {
           throw new Error('Could not fetch GoFile wt.obf.js (generateWT).');
@@ -3489,12 +3850,42 @@ resolvers.push([
 
     const resolved = [];
 
+    const resolveFileLink = obj => {
+      const fileId = obj.id || obj.code;
+      const fileName = encodeURIComponent(obj.name || fileId || 'file');
+
+      // Prefer direct/CDN links; /download/web/ may return album HTML.
+      const candidates = [obj.directLink, obj.link, obj.downloadLink].filter(Boolean);
+      const link =
+        candidates.find(u => /\/download\/direct\//i.test(String(u))) ||
+        candidates[0] ||
+        (fileId ? `https://gofile.io/download/web/${fileId}/${fileName}` : null);
+
+      if (link && obj.name) {
+        // Preserve API filenames rather than URL-encoded path segments.
+        try {
+          if (fileId) gofileNameById.set(String(fileId), String(obj.name));
+          gofileNameByUrl.set(String(link), String(obj.name));
+        } catch (e) {}
+      }
+      return link;
+    };
+
     const getChildAlbums = async (props, spoilers) => {
-      if (!props || props.status !== 'ok' || !props.data || !props.data.children) {
+      if (!props || props.status !== 'ok' || !props.data) {
         return [];
       }
 
       const resolved = [];
+
+      // A /d/ link can name a file, whose response has no children.
+      if (props.data.type === 'file') {
+        const link = resolveFileLink(props.data);
+        if (link) resolved.push(link);
+        return resolved;
+      }
+
+      if (!props.data.children) return [];
 
       folderName = props.data.name || folderName;
 
@@ -3506,27 +3897,8 @@ resolvers.push([
         if (!obj) continue;
 
         if (obj.type === 'file') {
-          const fileId = obj.id || obj.code;
-          const fileName = encodeURIComponent(obj.name || fileId || 'file');
-
-          // Prefer direct/CDN links when available. Do NOT force /download/web/
-          // (web flow can return album HTML).
-          const candidates = [obj.directLink, obj.link, obj.downloadLink].filter(Boolean);
-          let link =
-            candidates.find(u => /\/download\/direct\//i.test(String(u))) ||
-            candidates[0] ||
-            (fileId ? `https://gofile.io/download/web/${fileId}/${fileName}` : null);
-
-          if (link) {
-            // Preserve original GoFile filename (from API) so we don't rely on URL-encoded path segment.
-            try {
-              if (obj.name) {
-                if (fileId) gofileNameById.set(String(fileId), String(obj.name));
-                if (link) gofileNameByUrl.set(String(link), String(obj.name));
-              }
-            } catch (e) {}
-            resolved.push(link);
-          }
+          const link = resolveFileLink(obj);
+          if (link) resolved.push(link);
         } else if (obj.type === 'folder') {
           const folderId = obj.id || obj.code;
           if (!folderId) continue;
@@ -4820,7 +5192,7 @@ resolvers.push([
       const origin = `${u0.protocol}//${u0.hostname}`;
 
       const mId = (u0.pathname || '').match(/\/f\/([^\/?#]+)/i);
-      if (!mId || !mId[1]) return url;
+      if (!mId || !mId[1]) return null;
 
       const albumId = mId[1];
       const baseUrl = `${origin}/f/${albumId}`;
@@ -4978,7 +5350,10 @@ resolvers.push([
               Referer: baseUrl,
               __xfpd_withCredentials: true,
             },
+            'document',
+            FILESTER_API_TIMEOUT_MS,
           );
+          if (!(r?.status >= 200 && r.status < 300)) break;
           dom = r?.dom;
           source = r?.source || '';
         } catch (e) {
@@ -5008,11 +5383,11 @@ resolvers.push([
         if (added <= 0) break;
       }
 
-      if (!resolved.length) return url;
+      if (!resolved.length) return null;
 
       return { folderName, resolved };
     } catch (e) {
-      return url;
+      return null;
     }
   },
 ]);
@@ -5020,645 +5395,14 @@ resolvers.push([
 resolvers.push([
   [/filester\.(me|sh|si|gg)\/d\//],
   async (url, http, spoilers, postId, postSettings, progressCB) => {
-    const slug = (() => {
-      try {
-        const u = new URL(url);
-        const parts = String(u.pathname || '')
-          .split('/')
-          .filter(Boolean);
-        return parts.length ? parts[parts.length - 1] : '';
-      } catch (e) {
-        const m = /filester\.(me|sh|si|gg)\/d\/([^\/?#]+)/i.exec(String(url || ''));
-        return m && m[1] ? m[1] : '';
-      }
-    })();
-
-    if (!slug) return null;
-
-    const apiBase = 'https://filester.me';
-
-    const mkHeaders = () => ({
-      Accept: 'application/json, text/plain, */*',
-      'Content-Type': 'application/json;charset=UTF-8',
-      Origin: apiBase,
-      Referer: url,
-      __xfpd_withCredentials: true,
-    });
-
-    const safeJson = txt => {
-      try {
-        return JSON.parse(String(txt || ''));
-      } catch (e) {
-        return null;
-      }
-    };
-
-    const walk = (obj, cb, maxNodes = 5000) => {
-      const seen = new Set();
-      const q = [obj];
-      let nodes = 0;
-      while (q.length && nodes++ < maxNodes) {
-        const cur = q.shift();
-        if (!cur || typeof cur !== 'object') continue;
-        if (seen.has(cur)) continue;
-        seen.add(cur);
-        try {
-          if (cb(cur) === true) return true;
-        } catch (e) {}
-        if (Array.isArray(cur)) {
-          for (const it of cur) q.push(it);
-        } else {
-          for (const k of Object.keys(cur)) q.push(cur[k]);
-        }
-      }
-      return false;
-    };
-
-    const deepFindValueByKeys = (obj, keys) => {
-      const keySet = new Set((keys || []).map(k => String(k).toLowerCase()));
-      let out = null;
-      walk(obj, o => {
-        if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
-        for (const k of Object.keys(o)) {
-          if (keySet.has(String(k).toLowerCase())) {
-            const v = o[k];
-            if (v !== null && v !== undefined) {
-              out = v;
-              return true;
-            }
-          }
-        }
-        return false;
-      });
-      return out;
-    };
-
-    const normalizeUrl = s => {
-      if (!s || typeof s !== 'string') return null;
-      const t = s.trim();
-      if (/^https?:\/\//i.test(t)) return t;
-      if (t.startsWith('/')) {
-        try {
-          return new URL(t, apiBase).href;
-        } catch (e) {
-          return null;
-        }
-      }
-      if (/^[dv]\//i.test(t)) {
-        try {
-          return new URL('/' + t.replace(/^\/+/, ''), apiBase).href;
-        } catch (e) {
-          return null;
-        }
-      }
-      return null;
-    };
-
-    const pickBestUrl = obj => {
-      const candidates = [];
-      const push = v => {
-        const u = normalizeUrl(v);
-        if (u) candidates.push(u);
-      };
-
-      const prefer = deepFindValueByKeys(obj, [
-        'download_url',
-        'downloadUrl',
-        'url',
-        'link',
-        'href',
-        'direct',
-        'download',
-        'view_url',
-        'viewUrl',
-      ]);
-      if (prefer) push(prefer);
-
-      walk(obj, o => {
-        for (const k of Object.keys(o || {})) {
-          const v = o[k];
-          if (typeof v === 'string') push(v);
-        }
-        if (Array.isArray(o)) {
-          for (const it of o) if (typeof it === 'string') push(it);
-        }
-        return false;
-      });
-
-      const clean = candidates
-        .map(s => String(s))
-        .filter(s => !/filester\.(me|sh|si|gg)\/api\//i.test(s))
-        .filter(s => !/filester\.(me|sh|si|gg)\/(css|js)\//i.test(s));
-
-      if (!clean.length) return null;
-
-      const score = s => {
-        let sc = 0;
-        // Strongly prefer CDN /v/ stream URLs.
-        if (/https?:\/\/cache\d+\.filester\.(me|sh|si|gg)\/v\//i.test(s)) sc += 200;
-        else if (/cache\d+\.filester\.(me|sh|si|gg)/i.test(s)) sc += 160;
-        if (/\/v\//i.test(s)) sc += 80;
-        if (/\.filester\.(me|sh|si|gg)\//i.test(s)) sc += 10;
-        // De-prioritize HTML view tokens (/d/).
-        if (/\/d\//i.test(s)) sc -= 25;
-        if (/\.mp4(\?|$)/i.test(s)) sc += 2;
-        return sc;
-      };
-
-      clean.sort((a, b) => score(b) - score(a));
-      return clean[0];
-    };
-
-    const pickName = obj => {
-      const v = deepFindValueByKeys(obj, ['filename', 'file_name', 'name', 'original_name', 'originalName', 'title']);
-      if (typeof v === 'string' && v.trim()) return v.trim();
-      return null;
-    };
-
-    const pickSize = obj => {
-      const v = deepFindValueByKeys(obj, ['size', 'bytes', 'file_size', 'fileSize', 'length']);
-      const n = Number(v);
-      return Number.isFinite(n) ? n : 0;
-    };
-
-    let nameHint = null;
-    let sizeHint = 0;
-    let relViewPath = null;
-    let streamUrlImmediate = null;
-
-    const filesterExtFromCt = ct => {
-      const t = String(ct || '').toLowerCase();
-      if (t.includes('video/mp4')) return 'mp4';
-      if (t.includes('video/webm')) return 'webm';
-      if (t.includes('image/jpeg') || t.includes('image/jpg')) return 'jpg';
-      if (t.includes('image/png')) return 'png';
-      if (t.includes('image/gif')) return 'gif';
-      if (t.includes('application/zip')) return 'zip';
-      if (t.includes('application/x-7z-compressed')) return '7z';
-      if (t.includes('application/x-rar') || t.includes('application/vnd.rar')) return 'rar';
-      return 'bin';
-    };
-
-    const filesterParseViewMeta = html => {
-      const out = { fileName: '', fileType: '' };
-      const s = String(html || '');
-      const decode = raw => {
-        if (raw[0] === '"') {
-          try {
-            return JSON.parse(raw);
-          } catch (e) {
-            return '';
-          }
-        }
-        return String(raw.slice(1, -1)).replace(/\\'/g, "'").replace(/\\n/g, '\n');
-      };
-      const grab = key => {
-        const dq = new RegExp(`window\\.${key}\\s*=\\s*("(?:[^"\\\\]|\\\\.)*")\\s*;?`, 'm').exec(s);
-        if (dq && dq[1]) return decode(dq[1]);
-        const sq = new RegExp(`window\\.${key}\\s*=\\s*'([^'\\\\]*(?:\\\\.[^'\\\\]*)*)'\\s*;?`, 'm').exec(s);
-        if (sq && sq[1]) return decode(sq[1]);
-        return '';
-      };
-      out.fileName = grab('fileName');
-      out.fileType = grab('fileType');
-      return out;
-    };
-
-    const filesterNormalizeFilename = s => {
-      let name = String(s || '').trim();
-      if (!name) return '';
-
-      // If UTF-8 bytes were interpreted as Latin-1 (common in Chrome/Tampermonkey),
-      // decode it back to proper UTF-8.
-      try {
-        let hasHigh = false;
-        let allByte = true;
-        for (let i = 0; i < name.length; i++) {
-          const c = name.charCodeAt(i);
-          if (c > 255) {
-            allByte = false;
-            break;
-          }
-          if (c >= 128) hasHigh = true;
-        }
-        if (allByte && hasHigh && typeof TextDecoder !== 'undefined') {
-          const bytes = new Uint8Array(name.length);
-          for (let i = 0; i < name.length; i++) bytes[i] = name.charCodeAt(i) & 0xff;
-          const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-          if (decoded && decoded !== name) name = decoded;
-        }
-      } catch (e) {}
-
-      // Strip control chars (Windows will refuse these in filenames; mojibake often introduces them)
-      name = name.replace(/[\u0000-\u001F\u007F\u0080-\u009F]/g, '').trim();
-      return name;
-    };
-
-    const filesterParseDispositionFilename = headersRaw => {
-      const h = String(headersRaw || '');
-      const mLine = /content-disposition:\s*([^\r\n]+)/i.exec(h);
-      if (!mLine || !mLine[1]) return '';
-      const v = String(mLine[1] || '');
-
-      // RFC5987: filename*=UTF-8''...
-      let m = /filename\*\s*=\s*([^;]+)/i.exec(v);
-      if (m && m[1]) {
-        let val = String(m[1]).trim();
-        val = val.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
-
-        const mEnc = /^([^']*)''(.*)$/.exec(val);
-        if (mEnc) {
-          let data = String(mEnc[2] || '').trim();
-          try {
-            data = decodeURIComponent(data.replace(/\+/g, '%20'));
-          } catch (e) {
-            // best-effort
-          }
-          if (data) return filesterNormalizeFilename(data);
-        } else {
-          try {
-            const decoded = decodeURIComponent(val.replace(/\+/g, '%20'));
-            if (decoded) return filesterNormalizeFilename(decoded);
-          } catch (e) {}
-          if (val) return filesterNormalizeFilename(val);
-        }
-      }
-
-      // Basic: filename="..."
-      m = /filename\s*=\s*([^;]+)/i.exec(v);
-      if (m && m[1]) {
-        let val = String(m[1]).trim();
-        val = val.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
-        val = val.replace(/\\(.)/g, '$1');
-        return filesterNormalizeFilename(val);
-      }
-      return '';
-    };
-
-    const filesterProbe = async probeUrl => {
-      try {
-        // empty callback = headers-only request (aborts at readyState 2)
-        const r = await http.base(
-          'GET',
-          probeUrl,
-          { onResponseHeadersReceieved: () => {} },
-          { Range: 'bytes=0-0', Referer: `${apiBase}/`, __xfpd_withCredentials: true },
-          null,
-          'text',
-        );
-        const status = Number(r && r.status) || 0;
-        const headers = String((r && r.responseHeaders) || '');
-        const dispName = filesterParseDispositionFilename(headers);
-        const mCt = /content-type:\s*([^\r\n]+)/i.exec(headers);
-        const ct = mCt && mCt[1] ? mCt[1].trim() : '';
-        const mCr = /content-range:\s*bytes\s+\d+-\d+\/(\d+)/i.exec(headers);
-        const mCl = /content-length:\s*(\d+)/i.exec(headers);
-        const size = mCr && mCr[1] ? Number(mCr[1]) : mCl && mCl[1] ? Number(mCl[1]) : 0;
-        const isHtmlOrJson = /text\/html|application\/xhtml\+xml|application\/json/i.test(ct);
-        const ok = status >= 200 && status < 400 && !isHtmlOrJson;
-        return { ok, status, headers, contentType: ct, size: Number.isFinite(size) ? size : 0, fileName: dispName || '' };
-      } catch (e) {
-        return { ok: false, status: 0, headers: '', contentType: '', size: 0 };
-      }
-    };
-
-    const filesterResolveDownloadToken = async tokenUrl => {
-      try {
-        const ref = `${apiBase}/d/${slug}`;
-
-        // Phase 1: range request (follows redirects) to capture finalUrl without downloading the whole file.
-        const r1 = await http.base('GET', tokenUrl, {}, { Range: 'bytes=0-0', Referer: ref, __xfpd_withCredentials: true }, null, 'text');
-
-        const headers1 = String((r1 && r1.responseHeaders) || '');
-        const fu1 = String((r1 && r1.finalUrl) || '');
-
-        const mLoc1 = /(?:^|\r?\n)location:\s*([^\r\n]+)/i.exec(headers1);
-        const loc1Abs = normalizeUrl(mLoc1 && mLoc1[1] ? mLoc1[1] : '');
-        if (loc1Abs && /\/v\//i.test(loc1Abs)) return loc1Abs;
-        if (fu1 && /\/v\//i.test(fu1)) return fu1;
-
-        // If this looks like HTML, fetch the full HTML page (small) and extract the /v/ link.
-        const mCt1 = /content-type:\s*([^\r\n]+)/i.exec(headers1);
-        const ct1 = mCt1 && mCt1[1] ? String(mCt1[1]).trim() : '';
-        const isHtml = /text\/html|application\/xhtml\+xml/i.test(ct1);
-
-        if (isHtml) {
-          const r2 = await http.base(
-            'GET',
-            tokenUrl,
-            {},
-            { Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', Referer: ref, __xfpd_withCredentials: true },
-            null,
-            'text',
-          );
-
-          const headers2 = String((r2 && r2.responseHeaders) || '');
-          const fu2 = String((r2 && r2.finalUrl) || '');
-
-          const mLoc2 = /(?:^|\r?\n)location:\s*([^\r\n]+)/i.exec(headers2);
-          const loc2Abs = normalizeUrl(mLoc2 && mLoc2[1] ? mLoc2[1] : '');
-          if (loc2Abs && /\/v\//i.test(loc2Abs)) return loc2Abs;
-          if (fu2 && /\/v\//i.test(fu2)) return fu2;
-
-          const body = String((r2 && r2.source) || '');
-
-          const mFull = /(https?:\/\/cache\d+\.filester\.(me|sh|si|gg)\/v\/[^\"'<>\s]+)/i.exec(body);
-          if (mFull && mFull[1]) return String(mFull[1]).trim();
-
-          const mRel = /[\"'](\/v\/[^\"'<>\s]+)[\"']/i.exec(body);
-          if (mRel && mRel[1]) return new URL(String(mRel[1]), apiBase).href;
-        }
-
-        return null;
-      } catch (e) {
-        return null;
-      }
-    };
-
-    const recordStream = (streamUrl, p) => {
-      const streamCt = String((p && p.contentType) || '');
-      const streamSize = Number((p && p.size) || 0) || 0;
-      const streamHdrName = String((p && p.fileName) || '');
-      filesterSlugByUrl.set(String(streamUrl), String(slug));
-      const ref0 = relViewPath ? `${apiBase}${relViewPath}` : `${apiBase}/d/${slug}`;
-      if (ref0.startsWith('http')) {
-        filesterRefByUrl.set(String(streamUrl), String(ref0));
-        filesterRefByUrl.set(String(url), String(ref0));
-        filesterRefByUrl.set(`${apiBase}/d/${slug}`, String(ref0));
-      }
-      if (!nameHint && streamHdrName) nameHint = String(streamHdrName);
-      const ext = filesterExtFromCt(streamCt);
-      let finalName = nameHint || `Filester_${slug}.${ext || 'bin'}`;
-      if (!/\.[A-Za-z0-9]{1,8}$/.test(finalName) && ext) finalName = `${finalName}.${ext}`;
-      filesterNameBySlug.set(String(slug), String(finalName));
-      filesterNameByUrl.set(String(streamUrl), String(finalName));
-      filesterNameByUrl.set(String(url), String(finalName));
-      filesterNameByUrl.set(`${apiBase}/d/${slug}`, String(finalName));
-      if (relViewPath) filesterNameByUrl.set(`${apiBase}${relViewPath}`, String(finalName));
-      if (streamSize) {
-        filesterSizeBySlug.set(String(slug), Number(streamSize));
-        filesterSizeByUrl.set(String(streamUrl), Number(streamSize));
-      }
-      return streamUrl;
-    };
-
-    try {
-      if (progressCB) progressCB('[Filester] Fetching metadata...');
-      const viewRes = await http.base('POST', `${apiBase}/api/public/view`, {}, mkHeaders(), JSON.stringify({ file_slug: slug }), 'text');
-      const viewJson = safeJson(viewRes && viewRes.source);
-      if (viewJson) {
-        nameHint = pickName(viewJson) || nameHint;
-        sizeHint = pickSize(viewJson) || sizeHint;
-        const relView = deepFindValueByKeys(viewJson, ['view_url', 'viewUrl', 'view']);
-        if (typeof relView === 'string' && relView.trim()) {
-          const s = String(relView).trim();
-          if (s.startsWith('/v/')) {
-            relViewPath = s;
-          } else if (s.startsWith('v/')) {
-            relViewPath = '/' + s;
-          } else if (/^https?:\/\//i.test(s)) {
-            try {
-              const u0 = new URL(s);
-              if (/^\/v\//i.test(String(u0.pathname || ''))) {
-                relViewPath = String(u0.pathname || '') + String(u0.search || '');
-              }
-              // If the API already gave us a cache /v/ URL, keep it as an immediate candidate.
-              if (!streamUrlImmediate && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(s)) {
-                streamUrlImmediate = s;
-              }
-            } catch (e) {}
-          }
-        }
-      }
-    } catch (e) {}
-
-    // Try to extract the real filename (window.fileName = "...") from the HTML view.
-    // Some Filester API responses don't include the filename, but the HTML view does.
-    try {
-      // First try the slug page (it may redirect to /v/... or even directly to a cacheX /v/ stream).
-      // We use it for both filename hints and to discover the real /v/ path when the public API is blocked.
-      if (!nameHint || (!relViewPath && !streamUrlImmediate)) {
-        const slugPageUrl = `${apiBase}/d/${slug}`;
-        const htmlRes0 = await http.base(
-          'GET',
-          slugPageUrl,
-          {},
-          { Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', __xfpd_withCredentials: true },
-          {},
-          'text',
-        );
-        const html0 = String((htmlRes0 && htmlRes0.source) || '');
-        const meta0 = filesterParseViewMeta(html0);
-        if (meta0 && meta0.fileName) nameHint = String(meta0.fileName);
-
-        // If this request ended up at a /v/ URL, capture it.
-        const fu0 = String((htmlRes0 && htmlRes0.finalUrl) || '');
-        if (fu0 && /\/v\//i.test(fu0)) {
-          if (!streamUrlImmediate && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(fu0)) {
-            streamUrlImmediate = fu0;
-          }
-          if (!relViewPath) {
-            try {
-              const u1 = new URL(fu0);
-              if (/^\/v\//i.test(String(u1.pathname || ''))) {
-                relViewPath = String(u1.pathname || '') + String(u1.search || '');
-              }
-            } catch (e) {}
-          }
-        }
-
-        // Fallback: extract a /v/... token from the HTML itself.
-        if (!streamUrlImmediate) {
-          const mFull = /(https?:\/\/cache\d+\.filester\.(me|sh|si|gg)\/v\/[^\s"'<>]+)/i.exec(html0);
-          if (mFull && mFull[1] && /https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(mFull[1])) streamUrlImmediate = mFull[1];
-        }
-        if (!relViewPath) {
-          const mRel = /["'](\/v\/[^"'<>\s]+)["']/i.exec(html0) || /(\/v\/[0-9a-f]{16,}[^"'<>\s]*)/i.exec(html0);
-          if (mRel && mRel[1] && String(mRel[1]).startsWith('/v/')) relViewPath = mRel[1];
-        }
-      }
-
-      // If still missing, try the explicit view_url returned by the API.
-      if (!nameHint && relViewPath && /^\/v\//i.test(String(relViewPath))) {
-        const viewPageUrl = `${apiBase}${relViewPath}`;
-        const htmlRes = await http.base(
-          'GET',
-          viewPageUrl,
-          {},
-          { Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', __xfpd_withCredentials: true },
-          {},
-          'text',
-        );
-        const html = String((htmlRes && htmlRes.source) || '');
-        const meta = filesterParseViewMeta(html);
-        if (meta && meta.fileName) nameHint = filesterNormalizeFilename(String(meta.fileName));
-      }
-    } catch (e) {}
-
-    // Download API can return a /d/<token> which then redirects to the real /v/... stream URL.
-    // Use it as a fallback to discover the stream path when /api/public/view doesn't provide it.
-    try {
-      if (!streamUrlImmediate && !relViewPath) {
-        if (progressCB) progressCB('[Filester] Resolving download token...');
-        const dlRes0 = await http.base(
-          'POST',
-          `${apiBase}/api/public/download`,
-          {},
-          mkHeaders(),
-          JSON.stringify({ file_slug: slug }),
-          'text',
-        );
-
-        const src0 = String((dlRes0 && dlRes0.source) || '');
-        const dlJson0 = safeJson(src0);
-
-        let tokenUrl = null;
-        const rel = dlJson0 ? deepFindValueByKeys(dlJson0, ['download_url', 'downloadUrl', 'url']) : null;
-        if (typeof rel === 'string' && rel.trim()) tokenUrl = normalizeUrl(rel);
-
-        if (!tokenUrl) {
-          const m0 = /"download_url"\s*:\s*"([^"]+)"/i.exec(src0);
-          if (m0 && m0[1]) tokenUrl = normalizeUrl(m0[1]);
-        }
-
-        if (tokenUrl) {
-          // If the API returned a token (or /d/<token>), the actual stream is usually /v/<token> on cacheX.
-          // Build relViewPath early so the probe loop can find a working cache host (cache6 preferred).
-          let tokenStr = '';
-          const tk = dlJson0 ? deepFindValueByKeys(dlJson0, ['token']) : null;
-          if (typeof tk === 'string') tokenStr = String(tk).trim();
-          if (!tokenStr) {
-            const mTok = /\/d\/([^\/\?#]+)/i.exec(String(tokenUrl || ''));
-            if (mTok && mTok[1]) tokenStr = String(mTok[1]).trim();
-          }
-          if (tokenStr && !relViewPath) {
-            if (tokenStr.startsWith('/v/')) relViewPath = tokenStr;
-            else if (tokenStr.startsWith('v/')) relViewPath = '/' + tokenStr;
-            else if (tokenStr.startsWith('/d/')) relViewPath = tokenStr.replace(/^\/d\//i, '/v/');
-            else if (tokenStr.startsWith('d/')) relViewPath = '/' + tokenStr.replace(/^d\//i, 'v/');
-            else relViewPath = `/v/${tokenStr}`;
-          }
-
-          const sUrl = await filesterResolveDownloadToken(tokenUrl);
-          if (sUrl) {
-            try {
-              const u2 = new URL(sUrl);
-              if (/^\/v\//i.test(String(u2.pathname || ''))) {
-                relViewPath = String(u2.pathname || '') + String(u2.search || '');
-                if (/https?:\/\/cache6\.filester\.(me|sh|si|gg)\/v\//i.test(sUrl)) streamUrlImmediate = String(sUrl);
-              }
-            } catch (e) {
-              if (String(sUrl).startsWith('/v/')) relViewPath = String(sUrl);
-            }
-          }
-        }
-      }
-    } catch (e) {}
-
-    // If we already discovered a cache /v/ stream URL from redirects or HTML, prefer it.
-    try {
-      if (streamUrlImmediate) {
-        if (progressCB) progressCB('[Filester] Probing discovered stream URL...');
-        const p0 = await filesterProbe(streamUrlImmediate);
-        if (p0 && p0.ok) return recordStream(String(streamUrlImmediate), p0);
-      }
-    } catch (e) {}
-
-    // Prefer the cache /v/ stream URL. The /d/ token often requires a Filester referer (otherwise it returns not_whitelisted).
-    try {
-      if (relViewPath && /^\/v\//i.test(String(relViewPath))) {
-        if (progressCB) progressCB('[Filester] Probing cache stream URL...');
-        const bases = [];
-        // Chrome Tampermonkey downloads are more reliable when starting from filester.me (redirects preserve a Filester referrer).
-        if (!isFF) bases.push(apiBase);
-        bases.push('https://cache6.filester.me');
-        for (let i = 1; i <= 8; i++) if (i !== 6) bases.push(`https://cache${i}.filester.me`);
-        if (isFF) bases.push(apiBase);
-
-        let streamUrl = null;
-        let streamCt = '';
-        let streamSize = 0;
-        let streamHdrName = '';
-
-        for (const base of bases) {
-          const cand = String(base).replace(/\/$/, '') + String(relViewPath);
-          const p = await filesterProbe(cand);
-          if (p && p.ok) {
-            streamUrl = cand;
-            streamCt = String(p.contentType || '');
-            streamSize = Number(p.size || 0) || 0;
-            streamHdrName = String((p && p.fileName) || '');
-            break;
-          }
-        }
-
-        if (streamUrl) return recordStream(streamUrl, { contentType: streamCt, size: streamSize, fileName: streamHdrName });
-      }
-    } catch (e) {}
-
-    try {
-      if (progressCB) progressCB('[Filester] Resolving download URL...');
-      const dlRes = await http.base('POST', `${apiBase}/api/public/download`, {}, mkHeaders(), JSON.stringify({ file_slug: slug }), 'text');
-
-      const src = String((dlRes && dlRes.source) || '');
-      const dlJson = safeJson(src);
-      let dlUrl = null;
-
-      if (dlJson) {
-        dlUrl = pickBestUrl(dlJson);
-      }
-      if (dlJson && !dlUrl) {
-        const rel = deepFindValueByKeys(dlJson, ['download_url', 'downloadUrl', 'url']);
-        if (typeof rel === 'string' && rel.startsWith('/')) dlUrl = `${apiBase}${rel}`;
-      }
-
-      if (dlJson && !dlUrl) {
-        const waitRaw = deepFindValueByKeys(dlJson, ['wait', 'wait_time', 'waitSeconds', 'wait_seconds', 'seconds']);
-        const waitSec = Number(waitRaw);
-        if (Number.isFinite(waitSec) && waitSec > 0 && waitSec <= 300) {
-          try {
-            if (progressCB) progressCB(`[Filester] Waiting ${Math.ceil(waitSec)}s...`);
-          } catch (e) {}
-          await new Promise(r => setTimeout(r, Math.ceil(waitSec) * 1000));
-          const dlRes2 = await http.base(
-            'POST',
-            `${apiBase}/api/public/download`,
-            {},
-            mkHeaders(),
-            JSON.stringify({ file_slug: slug }),
-            'text',
-          );
-          const src2 = String((dlRes2 && dlRes2.source) || '');
-          const dlJson2 = safeJson(src2);
-          if (dlJson2) dlUrl = pickBestUrl(dlJson2);
-          if (!dlUrl) {
-            const m2 = /(https?:\/\/[^\s"'<>]+)/i.exec(src2);
-            if (m2 && m2[1]) dlUrl = m2[1];
-          }
-        }
-      }
-
-      if (!dlUrl) {
-        const m = /(https?:\/\/[^\s"'<>]+)/i.exec(src);
-        if (m && m[1]) dlUrl = m[1];
-      }
-
-      if (dlUrl) {
-        filesterSlugByUrl.set(String(dlUrl), String(slug));
-
-        if (nameHint) {
-          filesterNameBySlug.set(String(slug), String(nameHint));
-          filesterNameByUrl.set(String(dlUrl), String(nameHint));
-        }
-        if (sizeHint) {
-          filesterSizeBySlug.set(String(slug), Number(sizeHint));
-          filesterSizeByUrl.set(String(dlUrl), Number(sizeHint));
-        }
-        return dlUrl;
-      }
-    } catch (e) {}
-
-    return null;
+    const file = filesterParseFileUrl(url);
+    if (!file) return null;
+    const stream = await filesterResolveV2(http, file.apiBase, file.slug, progressCB);
+    if (!stream) return null;
+    filesterNameByUrl.set(String(url), stream.name);
+    filesterRefByUrl.set(String(url), stream.ref);
+    filesterSlugByUrl.set(String(url), file.slug);
+    return stream.url;
   },
 ]);
 
@@ -5891,7 +5635,7 @@ const isTurboUrl = u => /turbocdn\.st|turbo\.cr|turbovid\.cr/i.test(String(u || 
 const isImagebamCdnUrl = u => /https?:\/\/(?:images|thumbs)\d+\.imagebam\.com\//i.test(String(u || ''));
 const imagebamRefererForCdn = u => {
   try {
-    const uu = new URL(String(u || ''), typeof location !== 'undefined' && location.origin ? location.origin : '');
+    const uu = new URL(String(u || ''), typeof location !== 'undefined' && location.origin ? location.origin : undefined);
     const base = (uu.pathname || '').split('/').pop() || '';
     const id = base.replace(/\.[a-z0-9]+$/i, '');
     return id ? `https://www.imagebam.com/view/${id}` : 'https://www.imagebam.com/';
@@ -6096,17 +5840,6 @@ const captureDownloadHints = parsedPost => {
 
         bunkrNameByUrl.set(href0, nm);
         bunkrNameByUrl.set(stripUrlQueryAndFragment(href0), nm);
-      });
-
-      cc.querySelectorAll('a[href*="goonbox.cr/img/"]').forEach(a => {
-        const href0 = stripUrlQueryAndFragment(normUrl(a.getAttribute('href')));
-        if (!href0) return;
-
-        const img = a.querySelector('img');
-        const thumbUrl = img && (img.getAttribute('data-url') || img.getAttribute('src'));
-        if (!thumbUrl) return;
-
-        goonboxThumbByUrl.set(href0, thumbUrl);
       });
     }
   } catch (e) {}
@@ -6366,7 +6099,7 @@ const createDownloadMetadataReader = () => {
 
       // Fallback HEAD (works for GoFile store links and Pixeldrain list ZIPs)
       const nameHasExt = /\.[A-Za-z0-9]{1,8}$/.test(String(meta.filename || ''));
-      const isFilester = /(?:^https?:\/\/)?(?:cache\d+\.)?filester\.(me|sh|si|gg)\/v\//i.test(String(url || ''));
+      const isFilester = isFilesterUrl(url);
       const needHead = !!(isGoFile || isPixeldrain || (!isFilester && (!meta.size || !meta.filename || !nameHasExt)));
       if (needHead) {
         const hRes = await gmDownloadHead(url);
@@ -6444,9 +6177,7 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
       String((resource && resource.host && resource.host.name) || '').toLowerCase() === 'bunkr' ||
       /bunkr/i.test(String(url || '')) ||
       /bunkr/i.test(String((resource && resource.original) || ''));
-    const isFilester =
-      String((resource && resource.host && resource.host.name) || '').toLowerCase() === 'filester' ||
-      /(?:^|\.)filester\.(me|sh|si|gg)/i.test(String(url || ''));
+    const isFilester = String((resource && resource.host && resource.host.name) || '').toLowerCase() === 'filester' || isFilesterUrl(url);
 
     // Try to reuse the existing GoFile filename hints, if available.
     let filename = filenames.find(f => f.url === url);
@@ -6728,7 +6459,7 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
     }
 
     // Filester: prefer the real filename (from view page / API hints). Only fall back to a safe slug-based name when needed.
-    if (/(?:^|https?:\/\/)(?:cache\d+\.)?filester\.(me|sh|si|gg)\/(?:d|v)\//i.test(String(url || ''))) {
+    if (isFilesterUrl(url)) {
       try {
         let slug0 = '';
         const m = /https?:\/\/(?:www\.)?filester\.(me|sh|si|gg)\/d\/([^\/?#]+)/i.exec(String((resource && resource.original) || ''));
@@ -6818,7 +6549,7 @@ if (typeof module !== 'undefined' && module.exports) {
 }
 
 // Filester: classification, album ZIP-vs-DIRECT policy (applied once per post,
-// not once per batch), /d/->/v/ token preparation, and DIRECT cache preflight.
+// not once per batch), /d/->v2 token preparation, and bounded DIRECT preflight.
 const FIL_IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif', '.tif', '.tiff', '.jxl', '.heic', '.heif']);
 const FIL_VID_EXTS = new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.3gp']);
 
@@ -6831,9 +6562,9 @@ const filesterGuessExt = s => {
 const filesterSlugFromUrl = u0 => {
   try {
     const s = String(u0 || '');
-    const mD = /\/d\/([^\/?#]+)/i.exec(s);
+    const mD = /^(?:(?:https?:)?\/\/)?(?:[a-z0-9-]+\.)*filester\.(?:me|sh|si|gg)\/d\/([^\/?#]+)/i.exec(s);
     if (mD && mD[1]) return String(mD[1]);
-    // cacheN /v/ tokens -> map back to slug when known
+    // API-issued CDN streams and legacy /v/ tokens map back to their file slug.
     const s2 = String(filesterSlugByUrl.get(String(u0)) || '');
     if (s2) return s2;
   } catch (e) {}
@@ -7035,182 +6766,81 @@ const applyFilesterAlbumPolicy = async (resources, { zipped, readMetadata, postI
   } catch (e) {}
 };
 
-// Turn short /d/<slug> view URLs into cache /v/<token> stream URLs (no tabs).
-// Album pages (/f/...) mostly contain only short slugs, which require this token step.
-// Mutates resource.url; returns the (possibly unchanged) stream URL.
+// Album pages yield /d/<slug> links. Resolve their short-lived v2 tokens only
+// when downloading; return null on failure so the caller never saves view HTML.
 const prepareFilesterDownloadResource = async (resource, { postId, postNumber, tokenLogState }) => {
   const originalUrl = String((resource && resource.url) || '');
-  try {
-    const uF = new URL(originalUrl);
-    const isFilesterD = /(^|\.)filester\.(me|sh|si|gg)$/i.test(String(uF.host || '')) && /^\/d\//i.test(String(uF.pathname || ''));
-    if (!isFilesterD) return originalUrl;
+  const file = filesterParseFileUrl(originalUrl);
+  if (!file) return originalUrl;
+  const stream = await filesterResolveV2(h.http, file.apiBase, file.slug);
+  if (!stream) return null;
 
-    const slug =
-      String(uF.pathname || '')
-        .split('/')
-        .filter(Boolean)
-        .pop() || '';
-    // Short slugs look like "d8ZdCxc" / "QnUVP6A" etc.
-    const looksLikeShortSlug = /^[A-Za-z0-9]{6,12}$/.test(slug);
-    if (!looksLikeShortSlug) return originalUrl;
-
-    const apiRes = await h.http.base(
-      'POST',
-      'https://filester.me/api/public/download',
-      {},
-      {
-        Accept: 'application/json, text/plain, */*',
-        'Content-Type': 'application/json',
-        Origin: 'https://filester.me',
-        Referer: `https://filester.me/d/${slug}`,
-        __xfpd_withCredentials: true,
-      },
-      JSON.stringify({ file_slug: slug }),
-      'text',
-    );
-
-    const txt = String((apiRes && apiRes.source) || '');
-    let j = null;
-    try {
-      j = JSON.parse(txt);
-    } catch (e) {}
-
-    let token = '';
-    try {
-      if (j && typeof j.token === 'string') token = String(j.token).trim();
-    } catch (e) {}
-    if (!token) {
-      try {
-        const rel = j && (j.download_url || j.downloadUrl || j.url);
-        if (typeof rel === 'string' && rel.trim()) {
-          const m = /\/d\/([^\/?#]+)/i.exec(String(rel));
-          if (m && m[1]) token = String(m[1]).trim();
-        }
-      } catch (e) {}
-    }
-    if (!token) {
-      const m2 = /"token"\s*:\s*"([^"]+)"/i.exec(txt);
-      if (m2 && m2[1]) token = String(m2[1]).trim();
-    }
-
-    if (!token) return originalUrl;
-
-    const candidates = filesterBuildCandidates(token);
-    const streamUrl = candidates && candidates.length ? candidates[0] : `https://cache6.filester.me/v/${token}`;
-    try {
-      filesterCandidatesByToken.set(String(token), candidates);
-    } catch (e) {}
-    try {
-      for (const c of candidates || []) {
-        try {
-          filesterSlugByUrl.set(String(c), String(slug));
-        } catch (e) {}
-        try {
-          filesterRefByUrl.set(String(c), 'https://filester.me/');
-        } catch (e) {}
-      }
-    } catch (e) {}
-    if (!tokenLogState.filesterNoTabTokenLogged) {
-      tokenLogState.filesterNoTabTokenLogged = true;
-      log.post.info(postId, `::Filester slug->token->cache (no tab)::: ${slug} -> ${streamUrl}`, postNumber);
-    }
-
-    try {
-      filesterSlugByUrl.set(String(streamUrl), String(slug));
-    } catch (e) {}
-    try {
-      filesterRefByUrl.set(String(streamUrl), 'https://filester.me/');
-    } catch (e) {}
-    try {
-      filesterRefByUrl.set(String(originalUrl), 'https://filester.me/');
-    } catch (e) {}
-    resource.url = streamUrl;
-    return streamUrl;
-  } catch (e) {
-    return originalUrl;
+  filesterNameByUrl.set(originalUrl, stream.name);
+  filesterRefByUrl.set(originalUrl, stream.ref);
+  filesterSlugByUrl.set(originalUrl, file.slug);
+  resource.url = stream.url;
+  if (!tokenLogState.filesterNoTabTokenLogged) {
+    tokenLogState.filesterNoTabTokenLogged = true;
+    log.post.info(postId, `::Filester slug->v2 token (no tab)::: ${file.slug} -> ${stream.url}`, postNumber);
   }
+  return stream.url;
 };
 
-// Filester DIRECT: probe candidate cache hosts (Range: bytes=0-0) and pick the
-// first healthy one before GM_download. Returns { directUrl, preflightDone }.
+// V2 tokens are server-bound: only preflight the issued URL. Legacy /v/ streams
+// may rotate hosts, within both a per-request deadline and a total probe budget.
 const selectFilesterDirectUrl = async (url, resource, { postId, postNumber }) => {
-  try {
-    const ref = String(filesterRefByUrl.get(String(url)) || (resource && resource.original) || 'https://filester.me/');
-    const token0 = filesterTokenFromVUrl(String(url || ''));
+  const originalUrl = String(url || '');
+  const token = filesterTokenFromVUrl(originalUrl);
+  if (!token && !isFilesterUrl(originalUrl)) return { directUrl: originalUrl, preflightDone: false };
 
-    if (!token0) return { directUrl: String(url), preflightDone: false };
+  const ref = String(filesterRefByUrl.get(originalUrl) || (resource && resource.original) || 'https://filester.me/');
+  const candidates = token
+    ? [...new Set([originalUrl, ...(filesterCandidatesByToken.get(token) || filesterBuildCandidates(token))])]
+    : [originalUrl];
+  const deadline = Date.now() + FILESTER_PROBE_BUDGET_MS;
 
-    let candidates0 = filesterCandidatesByToken.get(token0) || filesterBuildCandidates(token0);
-    candidates0 = Array.isArray(candidates0) ? candidates0.slice() : [];
+  for (let i = 0; i < Math.min(3, candidates.length); i++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const candidate = candidates[i];
+    let response = null;
+    try {
+      response = await h.http.get(
+        candidate,
+        { onResponseHeadersReceieved: () => {} },
+        { Range: 'bytes=0-0', Accept: '*/*', Referer: ref, __xfpd_withCredentials: true },
+        'text',
+        Math.min(FILESTER_PROBE_TIMEOUT_MS, remaining),
+      );
+    } catch (e) {}
 
-    const u0 = String(url);
-    const ix = candidates0.indexOf(u0);
-    if (ix >= 0) candidates0.splice(ix, 1);
-    candidates0.unshift(u0);
-
-    const cacheLabel = u => {
-      const m = String(u || '').match(/https?:\/\/cache(\d+)\.filester\.(me|sh|si|gg)/i);
-      return m && m[1] ? `cache${m[1]}` : String(u || '').includes('filester.me') ? 'filester' : 'url';
-    };
-
-    const isRetryableStatus = st => {
-      const n = Number(st || 0) || 0;
-      return n === 0 || n === 400 || n === 403 || n === 404 || n === 429 || (n >= 500 && n <= 599);
-    };
-
-    const delays = [650, 1300, 2000];
-
-    for (let i = 0; i < 3; i++) {
-      const cand = candidates0[i] || u0;
-
-      const pre = await new Promise(resolve => {
-        try {
-          GM_xmlhttpRequest({
-            method: 'GET',
-            url: String(cand),
-            responseType: 'text',
-            anonymous: false,
-            withCredentials: true,
-            timeout: 5000,
-            headers: { Range: 'bytes=0-0', Accept: '*/*', Referer: ref },
-            onload: r => resolve(r),
-            onerror: _ => resolve(null),
-            ontimeout: _ => resolve(null),
-          });
-        } catch (e) {
-          resolve(null);
-        }
-      });
-
-      const st0 = Number((pre && pre.status) || 0) || 0;
-      const finalUrl = pre && (pre.finalUrl || pre.responseURL) ? String(pre.finalUrl || pre.responseURL) : '';
-      const ok = st0 && st0 < 400;
-
-      if (ok) {
-        const directUrl = finalUrl && /^https?:\/\//i.test(finalUrl) ? finalUrl : String(cand);
-
-        if (i > 0 || String(cand) !== u0 || (finalUrl && finalUrl !== cand)) {
-          log.post.info(postId, `::Filester DIRECT picked ${cacheLabel(cand)} (HTTP ${st0})::: ${directUrl}`, postNumber);
-        }
-        return { directUrl, preflightDone: true };
+    const status = Number(response?.status) || 0;
+    const headers = String(response?.responseHeaders || '');
+    const isGate = /(?:^|\r?\n)content-type:\s*(?:text\/html|application\/xhtml\+xml|application\/json)/i.test(headers);
+    if (status >= 200 && status < 400 && !isGate) {
+      const finalUrl = String(response.finalUrl || '');
+      const directUrl = /^https?:\/\//i.test(finalUrl) ? finalUrl : candidate;
+      const slug = filesterSlugByUrl.get(originalUrl);
+      if (filesterV2Urls.has(originalUrl)) filesterV2Urls.add(directUrl);
+      if (slug) filesterSlugByUrl.set(directUrl, slug);
+      filesterRefByUrl.set(directUrl, ref);
+      if (directUrl !== originalUrl) {
+        log.post.info(postId, `::Filester DIRECT selected stream (HTTP ${status})::: ${directUrl}`, postNumber);
       }
-
-      if (i < 2 && isRetryableStatus(st0) && candidates0[i + 1]) {
-        const next = candidates0[i + 1];
-        const delay = delays[i] || 1000;
-        log.post.info(
-          postId,
-          `::Filester DIRECT HTTP ${st0 || 0} -> retry [${i + 1}/3] after ${delay}ms; switching ${cacheLabel(cand)}->${cacheLabel(next)}::: ${next}`,
-          postNumber,
-        );
-        await h.delayedResolve(delay);
-      }
+      return { directUrl, preflightDone: true };
     }
 
-    return { directUrl: String(url), preflightDone: true };
-  } catch (e) {
-    return { directUrl: String(url), preflightDone: false };
+    const retryable = status === 0 || [400, 403, 404, 429].includes(status) || status >= 500;
+    if (!retryable) break;
+    if (i + 1 < Math.min(3, candidates.length)) {
+      const delay = Math.min(650 * (i + 1), deadline - Date.now());
+      if (delay <= 0) break;
+      log.post.info(postId, `::Filester DIRECT HTTP ${status} -> trying another legacy CDN::: ${candidates[i + 1]}`, postNumber);
+      await h.delayedResolve(delay);
+    }
   }
+
+  return { directUrl: originalUrl, preflightDone: true };
 };
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -7494,8 +7124,7 @@ const classifyDownloadAttempt = (resource, pass) => {
     String((host && host.name) || '').toLowerCase() === 'bunkr' ||
     /bunkr/i.test(String(url || '')) ||
     /bunkr/i.test(String(original || ''));
-  const isFilester =
-    String((host && host.name) || '').toLowerCase() === 'filester' || /(?:^|\.)filester\.(me|sh|si|gg)/i.test(String(url || ''));
+  const isFilester = String((host && host.name) || '').toLowerCase() === 'filester' || isFilesterUrl(url);
 
   let reflink = original;
   if (url.includes('bunkr')) {
@@ -7507,8 +7136,8 @@ const classifyDownloadAttempt = (resource, pass) => {
   if (url.includes('turbocdn.st')) {
     reflink = 'https://turbo.cr/';
   }
-  if (/(?:\bfilester\.(me|sh|si|gg)\b|cache\d+\.filester\.(me|sh|si|gg))/i.test(String(url || ''))) {
-    reflink = 'https://filester.me/';
+  if (isFilester) {
+    reflink = filesterRefByUrl.get(String(url)) || original || 'https://filester.me/';
   }
 
   // Cyberdrop: normalize referer/origin and build a /f/ page for optional warm-up.
@@ -7654,11 +7283,19 @@ const runDownloadTransfers = async run => {
         } catch (e) {}
       }
 
-      // Filester: turn short /d/<slug> view URLs into cache /v/<token> stream URLs (no tabs).
-      // Album pages (/f/...) mostly contain only short slugs, which require this token step.
+      // Albums yield /d/ pages; resolve them through the same v2 API as single files.
       if (isFilester) {
         const preppedUrl = String(resource.url || '');
         const streamUrl = await prepareFilesterDownloadResource(resource, { postId, postNumber, tokenLogState: batchState });
+        if (!streamUrl) {
+          actions.settle(attempt, {
+            statusColor: '#b23b3b',
+            updateStatus: true,
+            updateTotalProgress: true,
+            log: { level: 'error', message: `::Filester resolution failed::: ${preppedUrl}` },
+          });
+          return;
+        }
         if (streamUrl !== preppedUrl) {
           url = streamUrl;
           attempt.url = streamUrl;
@@ -7694,6 +7331,7 @@ const runDownloadTransfers = async run => {
       let switchedToDirect = false;
 
       const startDirectDownload = (metaHint = null) => {
+        switchedToDirect = true;
         downloadResourceDirect(run, batchState, attempt, metaHint, actions);
       };
 
@@ -7808,6 +7446,7 @@ const runDownloadTransfers = async run => {
         onload: async response => {
           const p = batchState.requestProgress.find(r => r.url === progressKey);
           if (p) clearInterval(p.intervalId);
+          if (switchedToDirect) return;
 
           if (abortReason === 'bunkr_maint' && bunkrMaintenanceHandled) return;
           // GoFile: this pass was superseded by a stall-triggered warm-up retry
@@ -8231,6 +7870,11 @@ const runDownloadTransfers = async run => {
       const intervalId = setInterval(async () => {
         const p = batchState.requestProgress.find(r => r.url === progressKey);
         if (!p) return;
+        // The direct transfer owns completion after a large-file handoff.
+        if (switchedToDirect) {
+          clearInterval(p.intervalId);
+          return;
+        }
 
         if (p.old === p.new) {
           const rr = batchState.requests.find(r => r.url === progressKey);
@@ -8799,6 +8443,11 @@ const selectedPosts = [];
   try {
     if (window.__XFPD_ABORT_MAIN) return;
   } catch (e) {}
+
+  if (/^(?:www\.)?goonbox\.cr$/i.test(location.hostname)) {
+    goonboxBridgeServe();
+    return;
+  }
 
   // @match now covers gofile.io (required by GM_cookie for the accountToken sync -- see
   // gofileSyncCookie), which also makes Tampermonkey inject/run this whole script on actual

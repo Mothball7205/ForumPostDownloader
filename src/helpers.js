@@ -223,9 +223,10 @@ const h = {
      * @param headers
      * @param data
      * @param responseType
+     * @param timeoutMs
      * @returns {Promise<unknown>}
      */
-    base: (method, url, callbacks = {}, headers = {}, data = {}, responseType = 'document') => {
+    base: (method, url, callbacks = {}, headers = {}, data = {}, responseType = 'document', timeoutMs = 0) => {
       return h.promise((resolve, reject) => {
         let responseHeaders = null;
         let request = null;
@@ -251,6 +252,7 @@ const h = {
           data,
           headers: hdrs,
           ...(withCredentials ? { withCredentials: true, anonymous: false } : {}),
+          timeout: timeoutMs,
           onreadystatechange: response => {
             if (response.readyState === 2) {
               responseHeaders = response.responseHeaders;
@@ -282,6 +284,11 @@ const h = {
             callbacks && callbacks.onError && callbacks.onError(error);
             reject(error);
           },
+          ontimeout: () => {
+            const error = new Error(`Request timed out: ${method} ${url}`);
+            callbacks?.onError?.(error);
+            reject(error);
+          },
         });
       });
     },
@@ -292,8 +299,8 @@ const h = {
      * @param responseType
      * @returns {Promise<unknown>}
      */
-    get: (url, callbacks = {}, headers = {}, responseType = 'document') => {
-      return h.promise(resolve => resolve(h.http.base('GET', url, callbacks, headers, null, responseType)));
+    get: (url, callbacks = {}, headers = {}, responseType = 'document', timeoutMs = 0) => {
+      return h.http.base('GET', url, callbacks, headers, null, responseType, timeoutMs);
     },
     /**
      * @param url
@@ -302,8 +309,8 @@ const h = {
      * @param headers
      * @returns {Promise<unknown>}
      */
-    post: (url, data = {}, callbacks = {}, headers = {}) => {
-      return h.promise(resolve => resolve(h.http.base('POST', url, callbacks, headers, data)));
+    post: (url, data = {}, callbacks = {}, headers = {}, responseType = 'document', timeoutMs = 0) => {
+      return h.http.base('POST', url, callbacks, headers, data, responseType, timeoutMs);
     },
   },
   re: {

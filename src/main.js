@@ -6,6 +6,11 @@ const selectedPosts = [];
     if (window.__XFPD_ABORT_MAIN) return;
   } catch (e) {}
 
+  if (/^(?:www\.)?goonbox\.cr$/i.test(location.hostname)) {
+    goonboxBridgeServe();
+    return;
+  }
+
   // @match now covers gofile.io (required by GM_cookie for the accountToken sync -- see
   // gofileSyncCookie), which also makes Tampermonkey inject/run this whole script on actual
   // gofile.io page loads (e.g. the warm-up tab). None of the forum-post logic below applies

@@ -6,6 +6,7 @@ const FILES = [
   'host-caches.js',
   'bunkr.js',
   'helpers.js',
+  'goonbox.js',
   'prototypes.js',
   'parsers.js',
   'styles.js',

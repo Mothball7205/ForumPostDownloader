@@ -26,17 +26,15 @@ resolvers.push([
 
     // GoFile no longer uses the static appdata.wt from config.js for /contents.
     // The website now derives a per-request X-Website-Token from the account token
-    // via generateWT() in https://gofile.io/dist/js/wt.obf.js, i.e.:
+    // via generateWT() in https://gofile.io/js/wt.obf.js, i.e.:
     //   WT = sha256(navigator.userAgent + "::" + navigator.language + "::" + token + "::<time>::<salt>")
     // <time> is NOT a static value -- it's Math.floor(Date.now() / 1000 / 14400) (a
     // 4-hour bucket), recomputed live inside generateWT() itself. <salt> is the one
     // actual fixed constant, which can still change whenever GoFile updates the file.
-    // We fetch the script live, eval it in a scoped Function (it only reads navigator,
-    // and the function declaration stays local, not leaked to global), and cache the
-    // source for a day -- safe because we call the eval'd generateWT() fresh on every
-    // request, so Date.now() is always evaluated at call time, not baked in when the
-    // source was cached. WT must be computed with the same UA/language the request is
-    // sent with; the language is also echoed back to the server via the X-BL header.
+    // We trust GoFile's script to compute this token, as its website does. Function
+    // keeps the declaration local but is not a sandbox. Only fetch website scripts
+    // from GoFile itself, and cache source rather than a time-dependent token.
+    // WT must use the same UA/language as the request; X-BL echoes the language.
     let cachedGenerateWT = null;
 
     const getGenerateWT = async (force = false) => {
@@ -47,7 +45,7 @@ resolvers.push([
       let src = !force && cached && cached.src && cached.ts && now - cached.ts < WT_MAX_AGE_MS ? cached.src : null;
 
       if (!src) {
-        const { source } = await gmReq('GET', 'https://gofile.io/dist/js/wt.obf.js', null, {}, 'text');
+        const { source } = await gmReq('GET', 'https://gofile.io/js/wt.obf.js', null, {}, 'text');
         src = source || '';
         if (!src || !/generateWT/.test(src)) {
           throw new Error('Could not fetch GoFile wt.obf.js (generateWT).');
@@ -255,12 +253,42 @@ resolvers.push([
 
     const resolved = [];
 
+    const resolveFileLink = obj => {
+      const fileId = obj.id || obj.code;
+      const fileName = encodeURIComponent(obj.name || fileId || 'file');
+
+      // Prefer direct/CDN links; /download/web/ may return album HTML.
+      const candidates = [obj.directLink, obj.link, obj.downloadLink].filter(Boolean);
+      const link =
+        candidates.find(u => /\/download\/direct\//i.test(String(u))) ||
+        candidates[0] ||
+        (fileId ? `https://gofile.io/download/web/${fileId}/${fileName}` : null);
+
+      if (link && obj.name) {
+        // Preserve API filenames rather than URL-encoded path segments.
+        try {
+          if (fileId) gofileNameById.set(String(fileId), String(obj.name));
+          gofileNameByUrl.set(String(link), String(obj.name));
+        } catch (e) {}
+      }
+      return link;
+    };
+
     const getChildAlbums = async (props, spoilers) => {
-      if (!props || props.status !== 'ok' || !props.data || !props.data.children) {
+      if (!props || props.status !== 'ok' || !props.data) {
         return [];
       }
 
       const resolved = [];
+
+      // A /d/ link can name a file, whose response has no children.
+      if (props.data.type === 'file') {
+        const link = resolveFileLink(props.data);
+        if (link) resolved.push(link);
+        return resolved;
+      }
+
+      if (!props.data.children) return [];
 
       folderName = props.data.name || folderName;
 
@@ -272,27 +300,8 @@ resolvers.push([
         if (!obj) continue;
 
         if (obj.type === 'file') {
-          const fileId = obj.id || obj.code;
-          const fileName = encodeURIComponent(obj.name || fileId || 'file');
-
-          // Prefer direct/CDN links when available. Do NOT force /download/web/
-          // (web flow can return album HTML).
-          const candidates = [obj.directLink, obj.link, obj.downloadLink].filter(Boolean);
-          let link =
-            candidates.find(u => /\/download\/direct\//i.test(String(u))) ||
-            candidates[0] ||
-            (fileId ? `https://gofile.io/download/web/${fileId}/${fileName}` : null);
-
-          if (link) {
-            // Preserve original GoFile filename (from API) so we don't rely on URL-encoded path segment.
-            try {
-              if (obj.name) {
-                if (fileId) gofileNameById.set(String(fileId), String(obj.name));
-                if (link) gofileNameByUrl.set(String(link), String(obj.name));
-              }
-            } catch (e) {}
-            resolved.push(link);
-          }
+          const link = resolveFileLink(obj);
+          if (link) resolved.push(link);
         } else if (obj.type === 'folder') {
           const folderId = obj.id || obj.code;
           if (!folderId) continue;

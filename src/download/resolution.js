@@ -47,17 +47,6 @@ const captureDownloadHints = parsedPost => {
         bunkrNameByUrl.set(href0, nm);
         bunkrNameByUrl.set(stripUrlQueryAndFragment(href0), nm);
       });
-
-      cc.querySelectorAll('a[href*="goonbox.cr/img/"]').forEach(a => {
-        const href0 = stripUrlQueryAndFragment(normUrl(a.getAttribute('href')));
-        if (!href0) return;
-
-        const img = a.querySelector('img');
-        const thumbUrl = img && (img.getAttribute('data-url') || img.getAttribute('src'));
-        if (!thumbUrl) return;
-
-        goonboxThumbByUrl.set(href0, thumbUrl);
-      });
     }
   } catch (e) {}
 };

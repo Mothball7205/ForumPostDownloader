@@ -3,20 +3,32 @@ const xfpdBunkrStripUrl = value =>
     .split('#')[0]
     .split('?')[0];
 
-const xfpdBunkrDecodeFinalUrl = data => {
+const xfpdBunkrBuildMediaUrl = data => {
+  if (!data || typeof data.mediafiles !== 'string' || typeof data.path !== 'string') return null;
   try {
-    if (!data || !data.url) return null;
-    if (!data.encrypted) return data.url;
-
-    const binaryString = atob(data.url);
-    const keyBytes = new TextEncoder().encode(`SECRET_KEY_${Math.floor(data.timestamp / 3600)}`);
-
-    return Array.from(binaryString)
-      .map((char, i) => String.fromCharCode(char.charCodeAt(0) ^ keyBytes[i % keyBytes.length]))
-      .join('');
+    const url = new URL(data.mediafiles + data.path);
+    if (!/^https?:$/.test(url.protocol)) return null;
+    if (data.original) url.searchParams.set('n', data.original);
+    return url.toString();
   } catch (e) {
     return null;
   }
+};
+
+const xfpdBunkrFetchMetadata = async (http, id) => {
+  const response = await http.post(
+    'https://dl.bunkr.cr/api/_001_v2',
+    JSON.stringify({ id }),
+    {},
+    {
+      'Content-Type': 'application/json',
+      Referer: `https://dl.bunkr.cr/file/${id}`,
+      Origin: 'https://dl.bunkr.cr',
+    },
+    'text',
+    BUNKR_RESOLVE_TIMEOUT_MS,
+  );
+  return JSON.parse(response.source);
 };
 
 resolvers.push([
@@ -102,26 +114,10 @@ resolvers.push([
       const tryNewApi = async () => {
         if (!bunkrDataId) return null;
         try {
-          const refererUrl = `https://get.bunkrr.su/file/${bunkrDataId}`;
-          const response = await http.post(
-            'https://apidl.bunkr.ru/api/_001_v2',
-            JSON.stringify({ id: bunkrDataId }),
-            {},
-            {
-              'Content-Type': 'application/json',
-              Referer: refererUrl,
-              Origin: 'https://get.bunkrr.su',
-            },
-          );
-          const text = String(response?.source || '');
-          if (!text) return null;
-          const data = JSON.parse(text);
-          if (!data) return null;
+          const data = await xfpdBunkrFetchMetadata(http, bunkrDataId);
 
-          let finalUrl = xfpdBunkrDecodeFinalUrl(data);
-          if (!finalUrl || typeof finalUrl !== 'string') return null;
-          finalUrl = finalUrl.trim();
-          if (finalUrl.startsWith('//')) finalUrl = 'https:' + finalUrl;
+          let finalUrl = xfpdBunkrBuildMediaUrl(data);
+          if (!finalUrl) return null;
 
           finalUrl = await xfpdBunkrSignCdnUrl(http, finalUrl);
 
@@ -317,26 +313,12 @@ resolvers.push([
 
       let data = null;
       try {
-        const refererUrl = `https://get.bunkrr.su/file/${dataId}`;
-        const response = await http.post(
-          'https://apidl.bunkr.ru/api/_001_v2',
-          JSON.stringify({ id: dataId }),
-          {},
-          {
-            'Content-Type': 'application/json',
-            Referer: refererUrl,
-            Origin: 'https://get.bunkrr.su',
-          },
-        );
-        const text = String(response?.source || '');
-        data = text ? JSON.parse(text) : null;
+        data = await xfpdBunkrFetchMetadata(http, dataId);
       } catch (e) {}
       if (!data) return null;
 
-      let finalUrl = xfpdBunkrDecodeFinalUrl(data);
-      if (!finalUrl || typeof finalUrl !== 'string') return null;
-      finalUrl = finalUrl.trim();
-      if (finalUrl.startsWith('//')) finalUrl = 'https:' + finalUrl;
+      let finalUrl = xfpdBunkrBuildMediaUrl(data);
+      if (!finalUrl) return null;
 
       finalUrl = await xfpdBunkrSignCdnUrl(http, finalUrl);
 
@@ -374,7 +356,16 @@ resolvers.push([
 
       if (!fresh.length) break;
 
-      const urls = await asyncPool(CONCURRENCY, fresh, resolveAlbumSlug);
+      let completed = 0;
+      if (typeof progressCB === 'function') progressCB(`Resolving Bunkr page ${page}: 0 / ${fresh.length} files`);
+      const urls = await asyncPool(CONCURRENCY, fresh, async slug => {
+        try {
+          return await resolveAlbumSlug(slug);
+        } finally {
+          completed++;
+          if (typeof progressCB === 'function') progressCB(`Resolving Bunkr page ${page}: ${completed} / ${fresh.length} files`);
+        }
+      });
 
       for (const u of urls) if (u) resolved.push(u);
     }

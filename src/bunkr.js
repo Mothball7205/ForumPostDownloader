@@ -1,3 +1,5 @@
+const BUNKR_RESOLVE_TIMEOUT_MS = 20000;
+
 // Warm-up can clear JS-only Cloudflare interstitials; interactive CAPTCHAs need manual completion.
 const BUNKR_CF_WARMUP_MS = 6000;
 const BUNKR_CF_MAX_RETRIES = 3;
@@ -195,7 +197,7 @@ async function xfpdBunkrGetWithCfRetry(http, url, warmUrlOrOrigin, allowWarmup =
   let last = null;
   for (let attempt = 0; attempt <= BUNKR_CF_MAX_RETRIES; attempt++) {
     try {
-      last = await http.get(url);
+      last = await http.get(url, {}, {}, 'document', BUNKR_RESOLVE_TIMEOUT_MS);
     } catch (e) {
       last = null;
     }
@@ -234,7 +236,13 @@ async function xfpdBunkrSignCdnUrl(http, rawUrl) {
   try {
     const urlObj = new URL(rawUrl);
     const path = decodeURIComponent(urlObj.pathname);
-    const signRes = await http.get(`https://glb-apisign.cdn.cr/sign?path=${encodeURIComponent(path)}`);
+    const signRes = await http.get(
+      `https://glb-apisign.cdn.cr/sign?path=${encodeURIComponent(path)}`,
+      {},
+      {},
+      'text',
+      BUNKR_RESOLVE_TIMEOUT_MS,
+    );
     const signText = String(signRes?.source || '');
     const signData = JSON.parse(signText);
     if (signData?.token && signData?.ex) {

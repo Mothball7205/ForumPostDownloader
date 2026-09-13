@@ -1,39 +1,96 @@
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
-const source = readFileSync('src/resolvers/bunkr.js', 'utf8');
+const source = ['src/helpers.js', 'src/bunkr.js', 'src/resolvers/bunkr.js'].map(file => readFileSync(file, 'utf8')).join('\n');
 
-const resolve = async (url, apiData = { url: 'https://media.cdn.cr/clip.mp4' }) => {
+const load = ({ timeoutId = null, malformed = false } = {}) => {
   const sandbox = {
     URL,
     resolvers: [],
     bunkrNameByUrl: new Map(),
-    xfpdBunkrFilterBases: bases => bases,
-    xfpdLooksLikeCfChallenge: () => false,
-    xfpdLooksLikeCfFilenameHint: () => false,
-    xfpdBunkrGetWithCfRetry: async (_, viewUrl) => {
-      if (!viewUrl.startsWith('https://bunkr.cr/')) throw new Error('Not a view host');
-      return { dom: { querySelector: selector => (selector === '[data-file-id]' ? { getAttribute: () => '42' } : null) } };
-    },
-    xfpdBunkrSignCdnUrl: async (_, url) => `${url}?signed=1`,
-    xfpdBunkrExtractNameFromVsData: () => '',
     console,
+    setTimeout,
+    clearTimeout,
+    http: options => {
+      queueMicrotask(() => {
+        const url = new URL(options.url);
+        let responseText = '',
+          response = null;
+        if (url.pathname.startsWith('/a/')) {
+          response = {
+            querySelector: selector => (selector === 'h1' ? { textContent: 'Album' } : null),
+            querySelectorAll: () =>
+              ['42', '43'].map(id => ({
+                getAttribute: () => `original-${id}.mp4`,
+                querySelector: () => ({ getAttribute: () => `/f/${id}` }),
+              })),
+          };
+        } else if (/\/(f|v)\//.test(url.pathname)) {
+          response = {
+            querySelector: selector =>
+              selector === '[data-file-id]'
+                ? {
+                    getAttribute: () =>
+                      url.pathname
+                        .split('/')
+                        .pop()
+                        .replace(/\.mp4$/, ''),
+                  }
+                : null,
+          };
+        } else if (url.origin === 'https://dl.bunkr.cr' && url.pathname === '/api/_001_v2') {
+          const { id } = JSON.parse(options.data);
+          if (id === timeoutId) {
+            // A nonresponding request only settles when the caller sets a deadline.
+            if (options.timeout > 0) options.ontimeout();
+            return;
+          }
+          responseText = JSON.stringify(
+            malformed ? {} : { mediafiles: 'https://media.cdn.cr', path: `/storage/${id}.mp4`, original: `original-${id}.mp4` },
+          );
+        } else if (url.origin === 'https://glb-apisign.cdn.cr') {
+          responseText = JSON.stringify({ token: 'signed', ex: 123 });
+        } else {
+          options.onerror(new Error(`Unexpected endpoint: ${url}`));
+          return;
+        }
+        options.onload({ status: 200, responseText, response });
+      });
+      return { abort() {} };
+    },
   };
   vm.createContext(sandbox);
-  vm.runInContext(source, sandbox);
-  return sandbox.resolvers[0][1](url, {
-    post: async () => ({ source: JSON.stringify(apiData) }),
-  });
+  vm.runInContext(source + '\nglobalThis.client = h.http;', sandbox);
+  return sandbox;
 };
 
-test('legacy Bunkr CDN media goes through view metadata and signing', async () => {
-  expect(await resolve('https://cdn12.bunkr.cr/clip.mp4')).toBe('https://media.cdn.cr/clip.mp4?signed=1');
+const mediaUrl = id => `https://media.cdn.cr/storage/${id}.mp4?n=original-${id}.mp4&token=signed&ex=123`;
+
+test('legacy Bunkr CDN media uses current metadata, original filename and signing', async () => {
+  const context = load();
+  expect(await context.resolvers[0][1]('https://cdn12.bunkr.cr/42.mp4', context.client)).toBe(mediaUrl('42'));
 });
 
 test('non-legacy direct media remains directly downloadable', async () => {
-  expect(await resolve('https://i.bunkr.cr/photo.jpg')).toBe('https://i.bunkr.cr/photo.jpg');
+  const context = load();
+  expect(await context.resolvers[0][1]('https://i.bunkr.cr/photo.jpg', context.client)).toBe('https://i.bunkr.cr/photo.jpg');
 });
 
 test('failed Bunkr resolution does not download an HTML view page', async () => {
-  expect(await resolve('https://bunkr.cr/f/clip', {})).toBeNull();
+  const context = load({ malformed: true });
+  expect(await context.resolvers[0][1]('https://bunkr.cr/f/42', context.client)).toBeNull();
+});
+
+test('Bunkr album resolves current metadata and stops on a repeated page', async () => {
+  const context = load();
+  const result = await context.resolvers[1][1]('https://bunkr.cr/a/album', context.client);
+  expect(result.folderName).toBe('Album');
+  expect(result.resolved).toEqual([mediaUrl('42'), mediaUrl('43')]);
+  expect(context.bunkrNameByUrl.get(mediaUrl('42'))).toBe('original-42.mp4');
+});
+
+test('a stalled Bunkr metadata request does not hold the album worker pool open', async () => {
+  const context = load({ timeoutId: '42' });
+  const result = await context.resolvers[1][1]('https://bunkr.cr/a/album', context.client);
+  expect(result.resolved).toEqual([mediaUrl('43')]);
 });

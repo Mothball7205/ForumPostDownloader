@@ -5,6 +5,8 @@
   "scripts": {
     "build": "bun build.js",
     "test": "bun test",
+    "format": "prettier --write src test build.js package.json .prettierrc.json && bun run build",
+    "format:check": "prettier --check src test build.js package.json .prettierrc.json",
     "dev": "chokidar build.js ./src/* -c 'bun build.js'"
   },
   "repository": {

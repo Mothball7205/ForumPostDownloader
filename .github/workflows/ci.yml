@@ -9,6 +9,6 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun test
       - run: bun run build
-      - run: bunx prettier --check src test
+      - run: bun run format:check
       - run: node --check dist/build.user.js
       - run: git diff --exit-code -- dist/build.user.js

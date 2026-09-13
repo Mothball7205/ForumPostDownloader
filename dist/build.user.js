@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name XenForoPostDownloader
-// @namespace https://github.com/SkyCloudDev
-// @author SkyCloudDev
+// @namespace https://github.com/Mothball7205/ForumPostDownloader
+// @author Mothball7205 (fork maintainer), SkyCloudDev (original author)
 // @description Downloads images and videos from posts
 // @version 4.2.0
 // @updateURL https://github.com/Mothball7205/ForumPostDownloader/raw/main/dist/build.user.js

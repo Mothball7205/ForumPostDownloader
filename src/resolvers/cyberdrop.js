@@ -1,8 +1,7 @@
 resolvers.push([
   [/fs-\d+\.cyberdrop\.[a-z]{2,}\/|cyberdrop\.[a-z]{2,}\/a\//],
   async (url, http, passwords, postId, postSettings, progressCB) => {
-    // Cyberdrop albums (/a/<id>) are HTML pages listing many /f/<id> file links.
-    // Resolve the album to a list of signed CDN URLs via the file auth API (no per-file warm-up tabs).
+    // Resolve album file links through the auth API without per-file warm-up tabs.
     try {
       url = String(url || '').trim();
       if (url.startsWith('//')) url = 'https:' + url;
@@ -78,7 +77,6 @@ resolvers.push([
         const m3 = src.match(/<title[^>]*>([^<]+)<\/title>/i);
         let t = (m1 && (m1[1] || m1[2])) || (m2 && m2[1]) || (m3 && m3[1]) || '';
         t = decodeHtml(t).trim();
-        // Strip common site suffixes
         t = t
           .replace(/\s*\|\s*CyberDrop.*$/i, '')
           .replace(/\s*-\s*CyberDrop.*$/i, '')
@@ -101,9 +99,7 @@ resolvers.push([
           const nm = (a.getAttribute('title') || a.textContent || '').trim();
           if (nm) cyberdropNameBySlug.set(slug, nm);
         });
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
       // Regex fallback (in case DOMParser is blocked).
       try {
@@ -114,9 +110,7 @@ resolvers.push([
           const nm = decodeHtml(m[2]).trim();
           if (nm) cyberdropNameBySlug.set(slug, nm);
         }
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
       const host = (() => {
         try {
@@ -190,12 +184,8 @@ resolvers.push([
 resolvers.push([
   [/fs-\d+\.cyberdrop\.[a-z]{2,}\/|cyberdrop\.[a-z]{2,}\/(f|e)\//, /:!cyberdrop\.[a-z]{2,}\/a\//],
   async (url, http) => {
-    // Cyberdrop embeds (/e/) expose the real file URL only after loading the /f/ page.
-    // Preferred approach:
-    //  1) Call the info API to get the signed CDN URL
-    //  2) If blocked, briefly warm up /f/ in an inactive tab and retry once
+    // Resolve via the API first; if blocked, warm up /f/ and retry once.
     try {
-      // Ensure absolute URL (some posts omit the scheme, e.g. "cyberdrop.cr/e/<slug>")
       url = String(url || '').trim();
       if (url.startsWith('//')) url = 'https:' + url;
       if (!/^https?:\/\//i.test(url)) url = 'https://' + url.replace(/^\/+/, '');
@@ -209,7 +199,6 @@ resolvers.push([
       const origin = `${u.protocol}//${u.hostname}`;
       const slugMatch = String(url).match(/\/([ef])\/([^\/?#]+)/i);
       if (!slugMatch || !slugMatch[2]) {
-        // Not a /f/ or /e/ URL; return as-is.
         return url;
       }
 
@@ -218,17 +207,15 @@ resolvers.push([
 
       const apiCandidates = [];
 
-      // New API style (observed on cyberdrop.cr): https://api.cyberdrop.cr/api/file/info/<slug>
+      // Prefer this mirror's info/auth endpoints, then known and legacy variants.
       const root = (u.hostname.match(/cyberdrop\.[a-z]+$/i) || [null])[0];
       const apiBaseDefault = root ? `https://api.${root}` : 'https://api.cyberdrop.cr';
       if (root) {
         apiCandidates.push(`https://api.${root}/api/file/info/${slug}`);
         apiCandidates.push(`https://api.${root}/api/file/auth/${slug}`);
       }
-      // Known working for cyberdrop.cr even if the embed is on /e/
       apiCandidates.push(`https://api.cyberdrop.cr/api/file/info/${slug}`);
       apiCandidates.push(`https://api.cyberdrop.cr/api/file/auth/${slug}`);
-      // Additional API variants seen in the wild
       if (root) {
         apiCandidates.push(`https://api.${root}/api/file/url/${slug}`);
         apiCandidates.push(`https://api.${root}/api/file/${slug}`);
@@ -238,7 +225,7 @@ resolvers.push([
       apiCandidates.push(`https://api.cyberdrop.cr/api/file/auth/${slug}`);
       apiCandidates.push(`https://api.cyberdrop.cr/api/file/${slug}`);
 
-      // Legacy API style (older Cyberdrop): https://cyberdrop.me/api/f/<slug>
+      // Legacy mirrors expose /api/f/ on the page origin.
       apiCandidates.push(`${origin}/api/f/${slug}`);
 
       const headers = {
@@ -281,7 +268,7 @@ resolvers.push([
           const apiBase = typeof baseHint === 'string' && /^https?:\/\//i.test(baseHint) ? baseHint.replace(/\/$/, '') : apiBaseDefault;
           if (!s) return out;
 
-          // 1) Quick regex for absolute token URL (unescaped or JSON-escaped)
+          // Prefer absolute token URLs, including JSON-escaped forms.
           const rePlain = new RegExp(`https?:\/\/[^"'\\s]+\/api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
           let m = s.match(rePlain);
           if (m && m[0]) out.direct = m[0];
@@ -292,7 +279,7 @@ resolvers.push([
             if (m && m[0]) out.direct = m[0].replace(/\\\//g, '/');
           }
 
-          // 2) Relative token URL (e.g. "/api/file/d/<slug>?token=...")
+          // Relative token URLs belong to the API origin that returned them.
           if (!out.direct) {
             const reRel1 = new RegExp(`\/api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
             m = s.match(reRel1);
@@ -305,7 +292,7 @@ resolvers.push([
             if (m && m[0]) out.direct = `${apiBase}/${m[0].replace(/^\//, '')}`;
           }
 
-          // 3) JSON parse + deep scan for filename and/or token/host components
+          // Some responses separate filename, token, host and auth URL.
           try {
             const j = JSON.parse(s);
             const seen = new Set();
@@ -320,9 +307,7 @@ resolvers.push([
 
             const looksLikeJwt = v => {
               if (!v || typeof v !== 'string') return false;
-              // Typical JWT: header.payload.sig (base64url)
-              if (/^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v)) return true;
-              return false;
+              return /^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v);
             };
 
             const isTokenUrl = v => {
@@ -346,7 +331,6 @@ resolvers.push([
                   const uu = new URL(t);
                   return `${uu.protocol}//${uu.hostname}`;
                 }
-                // plain hostname
                 if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(t)) return `https://${t}`;
               } catch (e) {}
               return null;
@@ -367,17 +351,10 @@ resolvers.push([
                   }
                 }
 
-                // token can be stored separately (e.g. "token": "eyJ...")
-                if (!out.token) {
-                  if (/(^|[^a-z])token([^a-z]|$)/i.test(String(key)) && looksLikeJwt(v)) {
-                    out.token = v;
-                  } else if (looksLikeJwt(v)) {
-                    // last resort: any JWT-looking string
-                    out.token = v;
-                  }
-                }
+                // Tokens may be separate from the URL, under arbitrary keys.
+                if (!out.token && looksLikeJwt(v)) out.token = v;
 
-                // auth URL can be provided separately (new API flow: info -> auth -> direct)
+                // Some info responses require a second request to an auth URL.
                 if (!out.auth) {
                   if (/(^|[^a-z])auth([^a-z]|$)/i.test(String(key)) && /\/api\/file\/auth\//i.test(v)) {
                     out.auth = v;
@@ -421,7 +398,7 @@ resolvers.push([
               if (direct && typeof direct === 'string') out.direct = direct;
             }
 
-            // Common auth URL fields (new Cyberdrop API flow: info -> auth -> direct)
+            // Explicit auth fields can supply URLs missed by the scan.
             if (!out.auth) {
               const a =
                 (j &&
@@ -451,7 +428,6 @@ resolvers.push([
               if (n && typeof n === 'string' && looksLikeName(n)) out.name = n.split(/[\\/]/).pop();
             }
 
-            // If we got token but not direct, try to build a direct URL
             if (!out.direct && out.token) {
               const tok = out.token.includes('%') ? out.token : encodeURIComponent(out.token);
               const base = out.base || apiBase;
@@ -459,12 +435,10 @@ resolvers.push([
             }
           } catch (e) {}
 
-          // Normalize escaped slashes if needed
           if (out.direct && typeof out.direct === 'string' && out.direct.includes('\\/')) {
             out.direct = out.direct.replace(/\\\//g, '/');
           }
 
-          // If out.direct is relative, make it absolute
           if (out.direct && typeof out.direct === 'string' && out.direct.startsWith('/')) {
             out.direct = `${apiBase}${out.direct}`;
           }
@@ -498,7 +472,7 @@ resolvers.push([
             let resolvedName = name || null;
             let resolvedDirect = direct || null;
 
-            // New flow: info returns auth_url; auth returns tokenized direct URL
+            // info -> auth -> tokenized direct URL.
             if (!resolvedDirect && auth && typeof auth === 'string') {
               const authUrl = auth;
               try {

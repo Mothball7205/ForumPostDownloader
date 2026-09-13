@@ -11,11 +11,7 @@ const selectedPosts = [];
     return;
   }
 
-  // @match now covers gofile.io (required by GM_cookie for the accountToken sync -- see
-  // gofileSyncCookie), which also makes Tampermonkey inject/run this whole script on actual
-  // gofile.io page loads (e.g. the warm-up tab). None of the forum-post logic below applies
-  // there, so bail out immediately rather than doing pointless work (redgifs token fetch,
-  // style injection) on GoFile's own pages.
+  // GoFile is matched for GM_cookie access, not forum UI initialization.
   try {
     if (/(^|\.)gofile\.io$/i.test(location.hostname)) return;
   } catch (e) {}
@@ -76,13 +72,11 @@ const selectedPosts = [];
         return parsedHosts.filter(host => host.enabled && host.resources.length).reduce((acc, host) => acc + host.resources.length, 0);
       };
 
-      // Create and attach the download button to post.
       const { btn: btnDownloadPost } = ui.buttons.addDownloadPostButton(post);
       const totalResources = parsedHosts.reduce((acc, host) => acc + host.resources.length, 0);
       const checkedLength = getTotalDownloadableResourcesForPostCB(parsedHosts);
       btnDownloadPost.innerHTML = `🡳 Download (${checkedLength}/${totalResources})`;
 
-      // Create download status / progress elements.
       const { el: statusText } = ui.labels.status.createStatusLabel();
       const filePBar = ui.pBars.createFileProgressBar();
       const totalPBar = ui.pBars.createTotalProgressBar();
@@ -163,7 +157,6 @@ const selectedPosts = [];
           });
       });
 
-      // TODO: Extract to ui.js
       const color = ui.getTooltipBackgroundColor();
 
       let html = ui.forms.createCheckbox('config-toggle-all-posts', settings.ui.checkboxes.toggleAllCheckboxLabel, false);

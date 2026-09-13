@@ -1,6 +1,3 @@
-/**
- * @param post
- */
 const addDuplicateTabLink = post => {
   const span = document.createElement('span');
   span.innerHTML = '<i class="fa fa-copy"></i> Duplicate Tab';
@@ -18,9 +15,6 @@ const addDuplicateTabLink = post => {
   post.parentNode.querySelector('.message-attribution-main').append(dupTabLI);
 };
 
-/**
- * @param post
- */
 const addShowDownloadPageBtnLink = post => {
   const span = document.createElement('span');
   span.innerHTML = '<i class="fa fa-arrow-up"></i> Download Page';
@@ -38,7 +32,6 @@ const addShowDownloadPageBtnLink = post => {
   post.parentNode.querySelector('.message-attribution-main').append(dupTabLI);
 };
 
-// TODO: Extract to ui.js
 const addDownloadPageButton = () => {
   const downloadAllButton = document.createElement('a');
   downloadAllButton.setAttribute('id', 'download-page');
@@ -57,9 +50,6 @@ const addDownloadPageButton = () => {
   return downloadAllButton;
 };
 
-/**
- * @param postFooter
- */
 const registerPostReaction = postFooter => {
   const hasReaction = postFooter.querySelector('.has-reaction');
   if (!hasReaction) {
@@ -75,12 +65,9 @@ const CYBERDROP_WARMUP_DEFAULT_MS = 2500;
 let cyberdropWarmupChain = Promise.resolve();
 const cyberdropWarmupAttempted = new Map();
 
-/**
- * Warm up a Cyberdrop /f/ page in a background tab to let the site set any required cookies.
- * Ensures at most one warm-up tab is open at any time.
- */
+// Let Cyberdrop set cookies in a background tab; serialize warmups so only one tab is open.
 async function cyberdropWarmupOnce(key, warmUrl, ms = CYBERDROP_WARMUP_DEFAULT_MS) {
-  // Back-compat: allow cyberdropWarmupOnce(url) calls.
+  // Also accepts a single warm-up URL.
   if (typeof warmUrl === 'undefined') {
     const maybeUrl = String(key || '').trim();
     if (/^https?:\/\//i.test(maybeUrl)) {
@@ -93,7 +80,7 @@ async function cyberdropWarmupOnce(key, warmUrl, ms = CYBERDROP_WARMUP_DEFAULT_M
     }
   }
 
-  // Normalize keys that accidentally include a full URL (avoid per-file warmups).
+  // Use origin-based keys to avoid warming up once per file.
   const _k0 = String(key || '').trim();
   if (_k0.indexOf('://') !== -1) {
     const m = _k0.match(/https?:\/\/[^\s]+/i);
@@ -138,7 +125,7 @@ async function cyberdropWarmupOnce(key, warmUrl, ms = CYBERDROP_WARMUP_DEFAULT_M
   await cyberdropWarmupChain;
 }
 
-// Legacy helper kept for compatibility (expects a Cyberdrop API URL that returns JSON with a "url" field).
+// Cyberdrop JSON endpoints may return the direct URL at url, data.url, or file.url.
 async function cyberdrop_helper(apiUrl) {
   const url = String(apiUrl || '');
   if (!url) return null;

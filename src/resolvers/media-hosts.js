@@ -12,8 +12,7 @@ resolvers.push([
 
     const { source } = await http.get(playerIFrameUrl);
 
-    // noinspection JSCheckFunctionSignatures
-    const props = JSON.parse(source || JSON.stringify([]));
+    const props = JSON.parse(source || '[]');
 
     if (props.sources && props.sources.length) {
       return props.sources[0].file;
@@ -114,12 +113,7 @@ resolvers.push([
     // If it's already absolute, keep it (don't rewrite hosts).
     if (/^https?:\/\//i.test(url)) return url;
 
-    // Otherwise it's a path; prefix with Simpcity origin.
     if (!url.startsWith('/')) url = '/' + url;
-
-    if (url.startsWith('/attachments/') || url.startsWith('/data/video/')) {
-      return `https://simpcity.su${url}`;
-    }
 
     return `https://simpcity.su${url}`;
   },

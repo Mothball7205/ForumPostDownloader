@@ -118,9 +118,7 @@ resolvers.push([
 
     let tries = 0;
 
-    // Scumbag pornhub won't send the right json link the first time.
-    // Still, there are ocassional 403s / redirects.
-    // TODO: Fix me
+    // The media endpoint can initially return invalid JSON, 403s or redirects.
     do {
       const infoURL = await resolvePH(url);
 

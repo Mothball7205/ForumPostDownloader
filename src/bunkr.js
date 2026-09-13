@@ -1,14 +1,11 @@
-// Bunkr/Cloudflare: best-effort warm-up to let the browser complete a JS-only CF interstitial ("Just a moment...").
-// NOTE: This does NOT solve interactive Turnstile/CAPTCHA challenges; in that case you still need to do it manually.
+// Warm-up can clear JS-only Cloudflare interstitials; interactive CAPTCHAs need manual completion.
 const BUNKR_CF_WARMUP_MS = 6000;
 const BUNKR_CF_MAX_RETRIES = 3;
 const BUNKR_CF_WARMUP_ACTIVE_TAB = false;
 
 const BUNKR_CF_WARMUP_COOLDOWN_MS = 15000; // reduce repeated warm-up tabs
 
-// Bunkr fast-fail + domain blacklist:
-// - On first 403 or obvious CF interstitial on a non-last domain, immediately switch to next domain (no extra retries).
-// - Blacklist the failing domain for a while so subsequent links skip it entirely.
+// Skip and temporarily ban blocked domains; reserve warm-up retries for the last resort.
 const BUNKR_FASTFAIL_ON_403 = true;
 const BUNKR_DOMAIN_BLACKLIST_MS = 60 * 60 * 1000; // 60 minutes
 const xfpdBunkrDomainBanUntil = new Map(); // baseOrigin -> timestamp
@@ -77,7 +74,6 @@ function xfpdLooksLikeCfChallenge(source, dom) {
     if (head.includes('just a moment')) return true;
     if (head.includes('attention required')) return true;
 
-    // DOM markers (when we have it)
     if (dom?.querySelector?.('#cf-challenge-running, #challenge-form, .cf-browser-verification, .cf-challenge')) return true;
   } catch (e) {}
   return false;
@@ -104,7 +100,6 @@ function xfpdBunkrExtractNameFromVsData(data) {
     add(data?.original);
     add(data?.title);
 
-    // common nesting patterns
     if (data?.data && typeof data.data === 'object') {
       add(data.data.name);
       add(data.data.filename);
@@ -153,7 +148,7 @@ async function xfpdWarmupTab(url, ms = BUNKR_CF_WARMUP_MS, active = BUNKR_CF_WAR
       tab?.close?.();
     } catch (e) {}
   } catch (e) {
-    // Ignore - warm-up is best-effort
+    // Keep the retry delay even when opening the tab fails.
     try {
       await h.delayedResolve(ms);
     } catch (e2) {}
@@ -163,17 +158,16 @@ async function xfpdWarmupTab(url, ms = BUNKR_CF_WARMUP_MS, active = BUNKR_CF_WAR
 let xfpdBunkrCfWarmupPromise = null;
 let xfpdBunkrCfWarmupLastAt = 0;
 
-// Ensure we open at most ONE warm-up tab at a time (and no more than once per cooldown window).
+// Share one warm-up tab across callers and enforce a cooldown.
 async function xfpdBunkrCfWarmup(url) {
   try {
     const now = Date.now();
 
-    // If a warm-up is already running, just wait for it.
     if (xfpdBunkrCfWarmupPromise) {
       return await xfpdBunkrCfWarmupPromise;
     }
 
-    // If we recently warmed up, don't open another tab; just wait a bit to avoid hammering.
+    // Wait without opening another tab during cooldown.
     if (now - xfpdBunkrCfWarmupLastAt < BUNKR_CF_WARMUP_COOLDOWN_MS) {
       try {
         await h.delayedResolve(Math.min(1000, BUNKR_CF_WARMUP_MS));
@@ -193,7 +187,6 @@ async function xfpdBunkrCfWarmup(url) {
       xfpdBunkrCfWarmupPromise = null;
     }
   } catch (e) {
-    // Best-effort
     return null;
   }
 }
@@ -210,8 +203,7 @@ async function xfpdBunkrGetWithCfRetry(http, url, warmUrlOrOrigin, allowWarmup =
     const dom = last?.dom;
     const source = last?.source || '';
 
-    // Fast-fail on 403 / CF interstitial for non-last domains:
-    // Immediately blacklist this domain and return, so the caller can try the next domain.
+    // Ban blocked non-last domains so the caller can try the next one.
     const status = Number(last?.status || 0);
     if (BUNKR_FASTFAIL_ON_403 && status === 403 && !allowWarmup) {
       xfpdBunkrBanBase(warmUrlOrOrigin || url);
@@ -259,8 +251,7 @@ async function xfpdBunkrPostVsWithCfRetry(http, endpoint, slug, refererUrl, orig
       lastStatus = 0;
     }
 
-    // Fast-fail on 403 / CF interstitial for non-last domains:
-    // Immediately blacklist this domain and return null so the caller tries the next domain.
+    // Ban blocked non-last domains so the caller can try the next one.
     if (BUNKR_FASTFAIL_ON_403 && Number(lastStatus || 0) === 403 && !allowWarmup) {
       xfpdBunkrBanBase(originUrl || refererUrl || endpoint);
       return null;

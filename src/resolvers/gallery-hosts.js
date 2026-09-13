@@ -159,9 +159,7 @@ resolvers.push([
     try {
       const { dom } = await http.get(url);
       return dom.querySelector('.header-content-right > a').getAttribute('href');
-    } catch (err) {
-      url => url;
-    }
+    } catch (err) {}
   },
 ]);
 

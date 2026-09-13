@@ -1,6 +1,4 @@
-// Generated artifacts: log.txt / links.txt, the main ZIP, and generated.zip.
-// Reads window.logs explicitly (never the bare `logs` alias) and preserves the
-// Firefox/Chromium save names plus the skip-empty-ZIP behavior.
+// Read window.logs directly: lifecycle cleanup replaces the array.
 const finalizeDownloadArtifacts = async (run, customFilename) => {
   const {
     postId,
@@ -34,11 +32,9 @@ const finalizeDownloadArtifacts = async (run, customFilename) => {
 
     const mainZipName = customFilename || `${title} #${postNumber}.zip`;
     const generatedZipName = `${title} #${postNumber} generated.zip`;
-    // Original (single ZIP) behavior.
     const needZipBlob = postSettings.generateLog || postSettings.generateLinks || (postSettings.zipped && zipFileCount > 0);
 
-    // If "Zipped" is enabled but nothing was added to the ZIP (e.g. everything was saved via DIRECT),
-    // skip creating an empty ZIP file.
+    // DIRECT-only runs may have no ZIP entries.
     if (postSettings.zipped && zipFileCount === 0 && !postSettings.generateLog && !postSettings.generateLinks) {
       log.post.info(postId, `::Zipped ON but nothing to zip (all DIRECT downloads) -> skipping ZIP::`, postNumber);
     }

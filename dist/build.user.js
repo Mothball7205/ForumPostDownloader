@@ -1,4 +1,3 @@
-// noinspection SpellCheckingInspection,JSUnresolvedVariable,JSUnresolvedFunction,TypeScriptUMDGlobal,JSUnusedGlobalSymbols
 // ==UserScript==
 // @name XenForoPostDownloader
 // @namespace https://github.com/SkyCloudDev
@@ -137,32 +136,23 @@
 // @grant GM_cookie
 
 // ==/UserScript==
-// --- tab handle helper (Tampermonkey can return either a Tab object or a Promise<Tab>) ---
+// Tab cleanup is best-effort; userscript managers may return a handle or a promise.
 function xfpdCloseTabHandle(tabOrPromise) {
   try {
     if (!tabOrPromise) return;
-    // Promise-like (e.g., some GM implementations return Promise<Tab>)
     if (typeof tabOrPromise.then === 'function') {
-      try {
-        tabOrPromise
-          .then(t => {
-            try {
-              if (t && typeof t.close === 'function') t.close();
-            } catch (e) {}
-          })
-          .catch(() => {});
-      } catch (e) {}
+      tabOrPromise
+        .then(tab => {
+          try {
+            if (tab && typeof tab.close === 'function') tab.close();
+          } catch {}
+        })
+        .catch(() => {});
       return;
     }
-    // Direct tab handle
-    if (typeof tabOrPromise.close === 'function') {
-      try {
-        tabOrPromise.close();
-      } catch (e) {}
-    }
+    if (typeof tabOrPromise.close === 'function') tabOrPromise.close();
   } catch (e) {}
 }
-// ---------------------------------------------------------------------------
 
 const JSZip = window.JSZip;
 const tippy = window.tippy;
@@ -171,16 +161,7 @@ window.isFF = typeof InstallTrigger !== 'undefined';
 window.logs = [];
 
 const log = {
-  /**
-   * @returns {number}
-   */
   separator: postId => window.logs.push({ postId, message: '-'.repeat(175) }),
-  /**
-   * @param postId
-   * @param str
-   * @param type
-   * @param toConsole
-   */
   write: (postId, str, type, toConsole = true) => {
     const date = new Date();
     const message = `[${date.toDateString()} ${date.toLocaleTimeString()}] [${type}] ${str}`
@@ -197,55 +178,15 @@ const log = {
       }
     }
   },
-  /**
-   * @param postId
-   * @param str
-   * @param scope
-   */
   info: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'INFO'),
-  /**
-   * @param postId
-   * @param str
-   * @param scope
-   */
   warn: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'WARNING'),
-  /**
-   * @param postId
-   * @param str
-   * @param scope
-   */
   error: (postId, str, scope) => log.write(postId, `[${scope}] ${str}`, 'ERROR'),
-  // TODO: Fix param orders for the methods: -.-
   post: {
-    /**
-     * @param postId
-     * @param str
-     * @param postNumber
-     * @returns {*}
-     */
     info: (postId, str, postNumber) => log.info(postId, str, `POST #${postNumber}`),
-    /**
-     * @param postId
-     * @param str
-     * @param postNumber
-     * @returns {*}
-     */
     error: (postId, str, postNumber) => log.error(postId, str, `POST #${postNumber}`),
   },
   host: {
-    /**
-     * @param postId
-     * @param str
-     * @param host
-     * @returns {*}
-     */
     info: (postId, str, host) => log.info(postId, str, host),
-    /**
-     * @param postId
-     * @param str
-     * @param host
-     * @returns {*}
-     */
     error: (postId, str, host) => log.error(postId, str, host),
   },
 };
@@ -295,18 +236,8 @@ const settings = {
 const gofileNameById = new Map();
 const gofileNameByUrl = new Map();
 
-// GoFile: the site itself authenticates CDN downloads (store*/cache*.gofile.io) via an
-// "accountToken" cookie, set client-side in account.js as:
-//   document.cookie = "accountToken=" + activeAccount.token + ";path=/;domain=gofile.io;SameSite=Lax;Secure;"
-// Our GM_xmlhttpRequest download calls send cookies (anonymous: false), so mirroring that
-// cookie with OUR already-resolved guest token keeps resolution and download on the same
-// account. (The old warm-up-tab-only approach loaded a bare gofile.io tab whose own JS has
-// no knowledge of our token -- it creates and cookies a brand-new, unrelated guest account,
-// which only works by chance.) Cheap local browser API, safe to call before every request.
-//
-// Whatever accountToken cookie already exists (e.g. the user's own logged-in GoFile session)
-// gets overwritten by this. Capture it once per run so it can be restored via
-// gofileRestoreCookie() once no post is still processing (see setProcessing() below).
+// GoFile CDN requests require the accountToken cookie used during resolution.
+// Capture the user's cookie before replacing it; restore it after the last active post.
 let gofileCookieCaptured = false;
 let gofileOriginalCookieValue = null; // null = no cookie existed originally
 
@@ -365,8 +296,7 @@ const gofileSyncCookie = token =>
     })();
   });
 
-// Restore whatever accountToken cookie existed before we started overwriting it (or remove
-// ours if none existed). Called once no post is still processing -- see setProcessing() below.
+// Restore the original accountToken, or remove ours if none existed.
 const gofileRestoreCookie = () =>
   new Promise(resolve => {
     try {
@@ -487,8 +417,7 @@ function isFilesterUrl(url) {
   );
 }
 
-// Shared by single links and album items, which obtain their short-lived token
-// only when downloading. The retired v1 API returns dead links even on HTTP 200.
+// Resolve short-lived v2 tokens at download time for both single files and album items.
 async function filesterResolveV2(http, apiBase, slug, progressCB) {
   const base = String(apiBase || 'https://filester.me').replace(/\/+$/, '');
   const value = String(slug || '').trim();
@@ -546,17 +475,14 @@ async function filesterResolveV2(http, apiBase, slug, progressCB) {
 // Bunkr filename hints (from /v/ pages)
 const bunkrNameByUrl = new Map();
 
-// Bunkr/Cloudflare: best-effort warm-up to let the browser complete a JS-only CF interstitial ("Just a moment...").
-// NOTE: This does NOT solve interactive Turnstile/CAPTCHA challenges; in that case you still need to do it manually.
+// Warm-up can clear JS-only Cloudflare interstitials; interactive CAPTCHAs need manual completion.
 const BUNKR_CF_WARMUP_MS = 6000;
 const BUNKR_CF_MAX_RETRIES = 3;
 const BUNKR_CF_WARMUP_ACTIVE_TAB = false;
 
 const BUNKR_CF_WARMUP_COOLDOWN_MS = 15000; // reduce repeated warm-up tabs
 
-// Bunkr fast-fail + domain blacklist:
-// - On first 403 or obvious CF interstitial on a non-last domain, immediately switch to next domain (no extra retries).
-// - Blacklist the failing domain for a while so subsequent links skip it entirely.
+// Skip and temporarily ban blocked domains; reserve warm-up retries for the last resort.
 const BUNKR_FASTFAIL_ON_403 = true;
 const BUNKR_DOMAIN_BLACKLIST_MS = 60 * 60 * 1000; // 60 minutes
 const xfpdBunkrDomainBanUntil = new Map(); // baseOrigin -> timestamp
@@ -625,7 +551,6 @@ function xfpdLooksLikeCfChallenge(source, dom) {
     if (head.includes('just a moment')) return true;
     if (head.includes('attention required')) return true;
 
-    // DOM markers (when we have it)
     if (dom?.querySelector?.('#cf-challenge-running, #challenge-form, .cf-browser-verification, .cf-challenge')) return true;
   } catch (e) {}
   return false;
@@ -652,7 +577,6 @@ function xfpdBunkrExtractNameFromVsData(data) {
     add(data?.original);
     add(data?.title);
 
-    // common nesting patterns
     if (data?.data && typeof data.data === 'object') {
       add(data.data.name);
       add(data.data.filename);
@@ -701,7 +625,7 @@ async function xfpdWarmupTab(url, ms = BUNKR_CF_WARMUP_MS, active = BUNKR_CF_WAR
       tab?.close?.();
     } catch (e) {}
   } catch (e) {
-    // Ignore - warm-up is best-effort
+    // Keep the retry delay even when opening the tab fails.
     try {
       await h.delayedResolve(ms);
     } catch (e2) {}
@@ -711,17 +635,16 @@ async function xfpdWarmupTab(url, ms = BUNKR_CF_WARMUP_MS, active = BUNKR_CF_WAR
 let xfpdBunkrCfWarmupPromise = null;
 let xfpdBunkrCfWarmupLastAt = 0;
 
-// Ensure we open at most ONE warm-up tab at a time (and no more than once per cooldown window).
+// Share one warm-up tab across callers and enforce a cooldown.
 async function xfpdBunkrCfWarmup(url) {
   try {
     const now = Date.now();
 
-    // If a warm-up is already running, just wait for it.
     if (xfpdBunkrCfWarmupPromise) {
       return await xfpdBunkrCfWarmupPromise;
     }
 
-    // If we recently warmed up, don't open another tab; just wait a bit to avoid hammering.
+    // Wait without opening another tab during cooldown.
     if (now - xfpdBunkrCfWarmupLastAt < BUNKR_CF_WARMUP_COOLDOWN_MS) {
       try {
         await h.delayedResolve(Math.min(1000, BUNKR_CF_WARMUP_MS));
@@ -741,7 +664,6 @@ async function xfpdBunkrCfWarmup(url) {
       xfpdBunkrCfWarmupPromise = null;
     }
   } catch (e) {
-    // Best-effort
     return null;
   }
 }
@@ -758,8 +680,7 @@ async function xfpdBunkrGetWithCfRetry(http, url, warmUrlOrOrigin, allowWarmup =
     const dom = last?.dom;
     const source = last?.source || '';
 
-    // Fast-fail on 403 / CF interstitial for non-last domains:
-    // Immediately blacklist this domain and return, so the caller can try the next domain.
+    // Ban blocked non-last domains so the caller can try the next one.
     const status = Number(last?.status || 0);
     if (BUNKR_FASTFAIL_ON_403 && status === 403 && !allowWarmup) {
       xfpdBunkrBanBase(warmUrlOrOrigin || url);
@@ -807,8 +728,7 @@ async function xfpdBunkrPostVsWithCfRetry(http, endpoint, slug, refererUrl, orig
       lastStatus = 0;
     }
 
-    // Fast-fail on 403 / CF interstitial for non-last domains:
-    // Immediately blacklist this domain and return null so the caller tries the next domain.
+    // Ban blocked non-last domains so the caller can try the next one.
     if (BUNKR_FASTFAIL_ON_403 && Number(lastStatus || 0) === 403 && !allowWarmup) {
       xfpdBunkrBanBase(originUrl || refererUrl || endpoint);
       return null;
@@ -857,110 +777,30 @@ async function xfpdBunkrSignCdnUrl(http, rawUrl) {
 const turboIdBySignedUrl = new Map();
 
 const h = {
-  /**
-   * @param v
-   * @returns {arg is any[]}
-   */
   isArray: v => Array.isArray(v),
-  /**
-   * @param v
-   * @returns {boolean}
-   */
   isObject: v => typeof v === 'object',
-  /**
-   * @param v
-   * @returns {boolean}
-   */
   isNullOrUndef: v => v === null || v === undefined || typeof v === 'undefined',
-  /**
-   * @param path
-   * @returns {unknown}
-   */
   basename: path =>
     path
       .replace(/\/(\s+)?$/, '')
       .split('/')
       .reverse()[0],
-  /**
-   * @param path
-   * @returns {string}
-   */
   fnNoExt: path => path.trim().split('.').reverse().slice(1).reverse().join('.'),
-  /**
-   * @param path
-   * @returns {unknown}
-   */
   ext: path => {
     return !path || path.indexOf('.') < 0 ? null : path.split('.').reverse()[0];
   },
-  /**
-   * @param element
-   * @returns {string}
-   */
   show: element => (element.style.display = 'block'),
-  /**
-   * @param element
-   * @returns {string}
-   */
   hide: element => (element.style.display = 'none'),
-  /**
-   * @param executor
-   * @returns {Promise<unknown>}
-   */
   promise: executor => new Promise(executor),
-  /**
-   * @param ms
-   * @returns {Promise<unknown>}
-   */
   delayedResolve: async ms => await h.promise(resolve => setTimeout(resolve, ms)),
-  /**
-   * @param tag
-   * @param content
-   * @returns {*}
-   */
   stripTag: (tag, content) => content.replace(new RegExp(`<${tag}.*?<\/${tag}>`, 'igs'), ''),
-  /**
-   * @param tags
-   * @param content
-   * @returns {*}
-   */
   stripTags: (tags, content) => tags.reduce((stripped, tag) => h.stripTag(tag, stripped), content),
-  /**
-   * @param string
-   * @param maxLength
-   * @returns {string|*}
-   */
   limit: (string, maxLength = 20) => (string.length > maxLength ? `${string.substring(0, maxLength - 1)}...` : string),
-  /**
-   * @param selector
-   * @param container
-   * @returns {*}
-   */
   element: (selector, container = document) => container.querySelector(selector),
-  /**
-   * @param selector
-   * @param container
-   * @returns {NodeListOf<*>}
-   */
   elements: (selector, container = document) => container.querySelectorAll(selector),
-  /**
-   * @param needle
-   * @param haystack
-   * @param ignoreCase
-   * @returns {boolean}
-   */
   contains: (needle, haystack, ignoreCase = true) =>
     (ignoreCase ? haystack.toLowerCase().indexOf(needle.toLowerCase()) : haystack.indexOf(needle)) > -1,
-  /**
-   * @param str
-   * @returns {*|string}
-   */
   ucFirst: str => (!str ? str : `${str[0].toUpperCase()}${str.substring(1)}`),
-  /**
-   * @param items
-   * @param cb
-   * @returns {*}
-   */
   unique: (items, cb) => {
     if (cb) {
       return items.reduce((acc, item) => (!acc.find(i => i[byKey] === item[byKey]) ? acc.concat(item) : acc), []);
@@ -968,13 +808,7 @@ const h = {
 
     return items.reduce((acc, item) => (acc.indexOf(item) < 0 ? acc.concat(item) : acc), []);
   },
-  /**
-   * https://github.com/sindresorhus/pretty-bytes
-   *
-   * @param number
-   * @param options
-   * @returns {string}
-   */
+  // Adapted from https://github.com/sindresorhus/pretty-bytes.
   prettyBytes: (number, options = {}) => {
     const BYTE_UNITS = ['B', 'kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
 
@@ -984,12 +818,7 @@ const h = {
 
     const BIBIT_UNITS = ['b', 'kibit', 'Mibit', 'Gibit', 'Tibit', 'Pibit', 'Eibit', 'Zibit', 'Yibit'];
 
-    /*
-    Formats the given number using `Number#toLocaleString`.
-    - If locale is a string, the value is expected to be a locale-key (for example: `de`).
-    - If locale is true, the system default locale is used for translation.
-    - If no value for locale is specified, the number is returned unmodified.
-    */
+    // A locale string/array selects locales; true or formatting options use the system locale.
     const toLocaleString = (number, locale, options) => {
       let result = number;
       if (typeof locale === 'string' || Array.isArray(locale)) {
@@ -1056,17 +885,9 @@ const h = {
     return prefix + numberString + separator + unit;
   },
   ui: {
-    /**
-     * @param element
-     * @param text
-     */
     setText: (element, text) => {
       element.textContent = text;
     },
-    /**
-     * @param element
-     * @param props
-     */
     setElProps: (element, props) => {
       for (const prop in props) {
         element.style[prop] = props[prop];
@@ -1074,22 +895,11 @@ const h = {
     },
   },
   http: {
-    /**
-     * @param method
-     * @param url
-     * @param callbacks
-     * @param headers
-     * @param data
-     * @param responseType
-     * @param timeoutMs
-     * @returns {Promise<unknown>}
-     */
     base: (method, url, callbacks = {}, headers = {}, data = {}, responseType = 'document', timeoutMs = 0) => {
       return h.promise((resolve, reject) => {
         let responseHeaders = null;
         let request = null;
-        // Allow passing non-header request options via a special key in the headers object.
-        // This keeps the original function signature intact.
+        // __xfpd_withCredentials is a request option carried in headers, not an HTTP header.
         const hdrs = {
           Referer: url,
           ...(headers || {}),
@@ -1150,32 +960,14 @@ const h = {
         });
       });
     },
-    /**
-     * @param url
-     * @param callbacks
-     * @param headers
-     * @param responseType
-     * @returns {Promise<unknown>}
-     */
     get: (url, callbacks = {}, headers = {}, responseType = 'document', timeoutMs = 0) => {
       return h.http.base('GET', url, callbacks, headers, null, responseType, timeoutMs);
     },
-    /**
-     * @param url
-     * @param data
-     * @param callbacks
-     * @param headers
-     * @returns {Promise<unknown>}
-     */
     post: (url, data = {}, callbacks = {}, headers = {}, responseType = 'document', timeoutMs = 0) => {
       return h.http.base('POST', url, callbacks, headers, data, responseType, timeoutMs);
     },
   },
   re: {
-    /**
-     * @param pattern
-     * @returns {string|*}
-     */
     stripFlags: pattern => {
       if (!h.contains('/', pattern)) {
         return pattern;
@@ -1187,10 +979,6 @@ const h = {
 
       return s.substring(index).split('').reverse().join('');
     },
-    /**
-     * @param pattern
-     * @returns {string|*}
-     */
     toString: pattern => {
       let stringified = h.re.stripFlags(pattern.toString());
 
@@ -1204,36 +992,21 @@ const h = {
 
       return stringified;
     },
-    /**
-     * @param pattern
-     * @param flags
-     * @returns {RegExp}
-     */
     toRegExp: (pattern, flags) => {
       return new RegExp(pattern, flags);
     },
-    /**
-     * @param pattern
-     * @param subject
-     * @returns {*|null}
-     */
     match: (pattern, subject) => {
       const matches = pattern.exec(subject);
       return matches && matches.length ? matches[0] : null;
     },
-    /**
-     * @source regex101.com
-     * @param pattern
-     * @param subject
-     * @returns {*[]}
-     */
+    // Adapted from regex101.com; requires a global or sticky pattern.
     matchAll: (pattern, subject) => {
       const matches = [];
 
       let m;
 
       while ((m = pattern.exec(subject)) !== null) {
-        // This is necessary to avoid infinite loops with zero-width matches
+        // Advance past zero-width matches to avoid an infinite loop.
         if (m.index === pattern.lastIndex) {
           pattern.lastIndex++;
         }
@@ -1527,20 +1300,12 @@ Array.prototype.unique = function (cb) {
 
 const parsers = {
   thread: {
-    /**
-     * @returns {string}
-     */
     parseTitle: () => {
       const emojisPattern =
         /[\u{1f300}-\u{1f5ff}\u{1f900}-\u{1f9ff}\u{1f600}-\u{1f64f}\u{1f680}-\u{1f6ff}\u{2600}-\u{26ff}\u{2700}-\u{27bf}\u{1f191}-\u{1f251}\u{1f004}\u{1f0cf}\u{1f170}-\u{1f171}\u{1f17e}-\u{1f17f}\u{1f18e}\u{3030}\u{2b50}\u{2b55}\u{2934}-\u{2935}\u{2b05}-\u{2b07}\u{2b1b}-\u{2b1c}\u{3297}\u{3299}\u{303d}\u{00a9}\u{00ae}\u{2122}\u{23f3}\u{24c2}\u{23e9}-\u{23ef}\u{25b6}\u{23f8}-\u{23fa}]/gu;
       let parsed = h.stripTags(['a', 'span'], h.element('.p-title-value').innerHTML).replace('/\n/g', '');
       return !settings.naming.allowEmojis ? parsed.replace(emojisPattern, settings.naming.invalidCharSubstitute).trim() : parsed.trim();
     },
-    /**
-     *
-     * @param post
-     * @returns {{pageNumber: string, post, spoilers: *, footer: HTMLElement, contentContainer: Element, textContent: (*|string|string), postId: string, postNumber: string, content: (*|string|string|string)}}
-     */
     parsePost: post => {
       const messageContent = post.parentNode.parentNode.querySelector('.message-content > .message-userContent');
       const footer = post.parentNode.parentNode.querySelector('footer');
@@ -1550,16 +1315,12 @@ const parsers = {
       const postId = /(?<=\/post-).*/i.exec(postIdAnchor.getAttribute('href'))[0];
       const postNumber = postIdAnchor.textContent.replace('#', '').trim();
 
-      // Remove the following from the post content:
-      // 1. Quotes.
-      // 2. CodeBlock headers
-      // 3. Spoiler button text from each spoiler
-      // 2. Icons from un-furled urls (url parser can sometimes match them).
+      // Exclude quoted posts and decorative markup that could produce spurious URL matches.
       ['.contentRow-figure', '.js-unfurl-favicon', 'blockquote', '.button-text > span']
         .flatMap(i => [...messageContentClone.querySelectorAll(i)])
         .forEach(i => {
           if (i.tagName === 'BLOCKQUOTE') {
-            // Only remove blockquotes that quote the other posts.
+            // Preserve blockquotes that aren't quoting another post.
             if (i.querySelector('.bbCodeBlock-title')) {
               i.remove();
             }
@@ -1568,29 +1329,21 @@ const parsers = {
           }
         });
 
-      // Remove thread links.
       [...messageContentClone.querySelectorAll('.contentRow-header > a[href^="https://simpcity.su/threads"]')]
         .map(a => a.parentNode.parentNode.parentNode.parentNode)
         .forEach(i => i.remove());
 
-      // Prevent duplicate detection: Simpcity attachment links often wrap a JPGX preview image.
-      // For parsing only, remove the preview <img> inside attachment links so we don't count/download it twice.
+      // Attachment links wrap JPGX previews; exclude the previews to avoid duplicate downloads.
       try {
         messageContentClone.querySelectorAll('a[href*="/attachments/"] img').forEach(img => img.remove());
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
-      // Goonbox links wrap a medium-res CDN thumbnail — suppress it so we call the API for the original instead.
+      // Exclude Goonbox thumbnails so its API resolves the originals.
       try {
         messageContentClone.querySelectorAll('a[href*="goonbox.cr"] img').forEach(img => img.remove());
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
-      // Decode forum outbound link protection (e.g. /redirect/?to=...&m=b64) for parsing only.
-      // Some forums wrap external URLs in a redirect/proxy URL and store the real target in query params
-      // (often base64). If we don't decode it, host detection won't see the original domain.
+      // Decode forum redirect/proxy links on the clone so host detection sees the original domains.
       try {
         const __decodeB64Url = s => {
           if (!s) return null;
@@ -1649,9 +1402,7 @@ const parsers = {
               try {
                 const d2 = decodeURIComponent(decoded);
                 if (/^https?:\/\//i.test(d2)) decoded = d2;
-              } catch (e) {
-                /* ignore */
-              }
+              } catch (e) {}
             }
 
             if (!/^https?:\/\//i.test(decoded)) return null;
@@ -1674,9 +1425,8 @@ const parsers = {
 
             const newHost = host.replace(/^thumbs/i, 'images');
             let path = u.pathname || '';
-            // common thumb naming: *_t.jpg
+            // Imagebam thumbnails use _t or -t before the extension.
             path = path.replace(/_t(\.[a-z0-9]+)$/i, '$1');
-            // some variants use -t
             path = path.replace(/-t(\.[a-z0-9]+)$/i, '$1');
 
             return `${u.protocol}//${newHost}${path}`;
@@ -1703,8 +1453,7 @@ const parsers = {
           }
         });
 
-        // Prevent common thumbnail URLs inside decoded redirect links from being treated as direct downloads.
-        // (Keeps the UI intact for non-thumb embeds, but avoids downloading *_t.jpg / thumbs.* previews.)
+        // Exclude thumbnails inside decoded links without changing the displayed post.
         try {
           messageContentClone.querySelectorAll('a[data-xfpd-decoded="1"] img').forEach(img => {
             const u = (img.getAttribute('data-url') || img.getAttribute('src') || '').trim();
@@ -1716,22 +1465,15 @@ const parsers = {
               const uu = new URL(u, location.origin);
               host = (uu.hostname || '').toLowerCase();
               path = (uu.pathname || '').toLowerCase();
-            } catch (e) {
-              // ignore
-            }
+            } catch (e) {}
 
             const isThumb = host.includes('thumb') || /_t\.(?:jpe?g|png|webp|gif)$/i.test(u) || /\/thumbs?\//i.test(path);
 
             if (isThumb) img.remove();
           });
-        } catch (e) {
-          /* ignore */
-        }
-      } catch (e) {
-        /* ignore */
-      }
+        } catch (e) {}
+      } catch (e) {}
 
-      // Extract spoilers from the post content.
       const spoilers = [...messageContentClone.querySelectorAll('.bbCodeBlock--spoiler > .bbCodeBlock-content')]
         .filter(s => !s.querySelector('.bbCodeBlock--unfurl'))
         .concat([...messageContentClone.querySelectorAll('.bbCodeInlineSpoiler')].filter(s => !s.querySelector('.bbCodeBlock--unfurl')))
@@ -1774,15 +1516,10 @@ const parsers = {
     },
   },
   hosts: {
-    /**
-     * @param postContent
-     * @returns {(*&{id: number, enabled: boolean})[]}
-     */
     parseHosts: postContent => {
       let parsed = [];
 
       for (const host of hosts) {
-        // Require at-least the signature plus an array of matchers.
         if (host.length < 2) {
           continue;
         }
@@ -1818,8 +1555,7 @@ const parsers = {
           let matches = h.re.matchAll(pattern, postContent).unique();
 
           matches = matches.map(url => {
-            // Some XenForo post HTML can leak into the match (e.g. trailing </a>...</div>), which then
-            // creates "ghost" resources (and broken filenames like "div>"). Strip anything after the URL.
+            // Trim leaked HTML from URL matches to avoid ghost resources and broken filenames.
             url = String(url || '');
             url = url.replace(/&amp;/g, '&');
             url = url.split(/[\s"'<>]/)[0].trim();
@@ -1897,22 +1633,12 @@ const styles = {
 };
 
 const ui = {
-  /**
-   * @returns {string}
-   */
   getTooltipBackgroundColor: () => {
     const scheme = document.documentElement.dataset.colorScheme;
     return scheme === 'dark' ? '#2B2B2B' : '#EDF0F3';
   },
 
-  /**
-   * @param target
-   * @param content
-   * @param options
-   * @returns {*}
-   */
   tooltip: (target, content, options = {}) => {
-    // noinspection JSUnusedGlobalSymbols
     return tippy(target, {
       arrow: true,
       theme: 'transparent',
@@ -1925,12 +1651,6 @@ const ui = {
     });
   },
   pBars: {
-    /**
-     * @param color
-     * @param height
-     * @param width
-     * @returns {HTMLDivElement}
-     */
     base: (color, height = '3px', width = '0%') => {
       const pb = document.createElement('div');
       pb.style.height = height;
@@ -1938,19 +1658,11 @@ const ui = {
       pb.style.width = width;
       return pb;
     },
-    /**
-     * @param color
-     * @returns {HTMLDivElement}
-     */
     createFileProgressBar: (color = '#46658b') => {
       const pb = ui.pBars.base(color);
       pb.style.marginBottom = '1px';
       return pb;
     },
-    /**
-     * @param color
-     * @returns {HTMLDivElement}
-     */
     createTotalProgressBar: (color = '#545454') => {
       const pb = ui.pBars.base(color);
       pb.style.marginBottom = '10px';
@@ -1958,11 +1670,6 @@ const ui = {
     },
   },
   labels: {
-    /**
-     * @param initialText
-     * @param color
-     * @returns {{container: HTMLDivElement, el: HTMLSpanElement}}
-     */
     createBlockLabel: (initialText = null, color = '#959595') => {
       const container = document.createElement('div');
       container.style.color = color;
@@ -1981,10 +1688,6 @@ const ui = {
       };
     },
     status: {
-      /**
-       * @param initialText
-       * @returns {{container: HTMLDivElement, el: HTMLSpanElement}}
-       */
       createStatusLabel: (initialText = '') => {
         const label = ui.labels.createBlockLabel(initialText);
         label.el.style.marginBottom = '3px';
@@ -1994,9 +1697,6 @@ const ui = {
     },
   },
   buttons: {
-    /**
-     * @returns {HTMLAnchorElement}
-     */
     createPostDownloadButton: () => {
       const downloadPostBtn = document.createElement('a');
       downloadPostBtn.setAttribute('href', '#');
@@ -2004,16 +1704,9 @@ const ui = {
 
       return downloadPostBtn;
     },
-    /**
-     * @returns {HTMLLIElement}
-     */
     createPostDownloadButtonContainer: () => {
       return document.createElement('li');
     },
-    /**
-     * @param post
-     * @returns {{container: HTMLLIElement, btn: HTMLAnchorElement}}
-     */
     addDownloadPostButton: post => {
       const btnDownloadPostContainer = ui.buttons.createPostDownloadButtonContainer();
       const btnDownloadPost = ui.buttons.createPostDownloadButton();
@@ -2027,12 +1720,6 @@ const ui = {
     },
   },
   forms: {
-    /**
-     * @param id
-     * @param label
-     * @param checked
-     * @returns {string}
-     */
     createCheckbox: (id, label, checked) => {
       return `
           <div class="menu-row" style="margin-top: -5px;">
@@ -2049,10 +1736,6 @@ const ui = {
           </div>
           `;
     },
-    /**
-     * @param content
-     * @returns {string}
-     */
     createRow: content => {
       return `
       <div class="menu-row">
@@ -2060,10 +1743,6 @@ const ui = {
       </div>
       `;
     },
-    /**
-     * @param label
-     * @returns {string}
-     */
     createLabel: label => {
       return `
       <div style="font-weight: bold; margin-top:5px; margin-bottom: 8px; color: #3DB7C7;">
@@ -2073,11 +1752,6 @@ const ui = {
     },
     config: {
       page: {
-        /**
-         * @param backgroundColor
-         * @param innerHTML
-         * @returns {string}
-         */
         createForm: (backgroundColor, innerHTML) => {
           return `
           <form
@@ -2091,12 +1765,6 @@ const ui = {
         },
       },
       post: {
-        /**
-         * @param postId
-         * @param backgroundColor
-         * @param innerHTML
-         * @returns {string}
-         */
         createForm: (postId, backgroundColor, innerHTML) => {
           return `
           <form
@@ -2108,13 +1776,6 @@ const ui = {
           </form>
           `;
         },
-        /**
-         * @param currentValue
-         * @param postId
-         * @param backgroundColor
-         * @param placeholder
-         * @returns {string}
-         */
         createFilenameInput: (currentValue, postId, backgroundColor, placeholder) => {
           return `
           <div class="menu-row">
@@ -2135,56 +1796,27 @@ const ui = {
           </div>
           `;
         },
-        /**
-         * @returns {string}
-         */
         createZippedCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-zipped`, 'Zipped', checked);
         },
-        /**
-         * @returns {string}
-         */
-        /**
-         * @returns {string}
-         */
         createFlattenCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-flatten`, 'Flatten', checked);
         },
-        /**
-         * @returns {string}
-         */
         createSkipDownloadCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-skip-download`, 'Skip Download', checked);
         },
-        /**
-         * @returns {string}
-         */
         createVerifyBunkrLinksCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-verify-bunkr-links`, 'Verify Bunkr Links', checked);
         },
-        /**
-         * @returns {string}
-         */
         createGenerateLinksCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-generate-links`, 'Generate Links', checked);
         },
-        /**
-         * @returns {string}
-         */
         createGenerateLogCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-generate-log`, 'Generate Log', checked);
         },
-        /**
-         * @returns {string}
-         */
         createSkipDuplicatesCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-skip-duplicates`, 'Skip Duplicates', checked);
         },
-        /**
-         * @param hosts
-         * @param getTotalDownloadableResourcesCB
-         * @returns {string}
-         */
         createFilterLabel: (hosts, getTotalDownloadableResourcesCB) => {
           return `
           <div style="font-weight: bold; margin-top:5px; margin-bottom: 8px; margin-left: 8px; color: #3DB7C7;">Filter <span id="filtered-count">(${getTotalDownloadableResourcesCB(
@@ -2192,29 +1824,13 @@ const ui = {
           )})</span></div>
           `;
         },
-        /**
-         * @param postId
-         * @returns {string}
-         */
         createToggleAllCheckbox: postId => {
           return ui.forms.createCheckbox(`settings-toggle-all-hosts-${postId}`, settings.ui.checkboxes.toggleAllCheckboxLabel, true);
         },
-        /**
-         * @param postId
-         * @param host
-         * @returns {string}
-         */
         createHostCheckbox: (postId, host) => {
           const title = `${host.name} ${host.category}`;
           return ui.forms.createCheckbox(`downloader-host-${host.id}-${postId}`, `${title} (${host.resources.length})`, host.enabled);
         },
-        /**
-         * @param postId
-         * @param filterLabel
-         * @param hostsHtml
-         * @param createToggleAllCheckbox
-         * @returns {string}
-         */
         createHostCheckboxes: (postId, filterLabel, hostsHtml, createToggleAllCheckbox) => {
           return `
           <div>
@@ -2224,15 +1840,6 @@ const ui = {
           </div>
           `;
         },
-        /**
-         * @param parsedPost
-         * @param parsedHosts
-         * @param defaultFilename
-         * @param settings
-         * @param onSubmitFormCB
-         * @param totalDownloadableResourcesForPostCB
-         * @param btnDownloadPost
-         */
         createPostConfigForm: (
           parsedPost,
           parsedHosts,
@@ -2435,13 +2042,11 @@ const ui = {
 
 const init = {
   injectCustomStyles: () => {
-    // Tippy transparent theme.
     const styleEl = document.createElement('style');
     styleEl.textContent = styles.tippy.theme;
     document.head.append(styleEl);
 
     const customStyles = document.createElement('style');
-    // Margins classes
     const marginClasses = [];
 
     for (let i = 1; i <= 15; i++) {
@@ -2453,50 +2058,15 @@ const init = {
     document.head.append(customStyles);
   },
 };
-// Holds the posts that are processing downloads.
+// Posts with active downloads.
 let processing = [];
 
-/**
- * An array of arrays defining how to match hosts inside the posts.
- *
- * The first item in the array is the signature.
- * The second item is an array of matchers.
- *
- * A matcher is a regular expression matching a substring inside the post.
- *
- * The first matcher matches a single resource (e.g. an image or a video).
- * The second matcher matches a folder or an album (e.g. a set of related images)
- *
- * [0: signature(name+category), 1: [single_regex, album_regex]]
- *
- * When applied, every matcher is prefixed with https?:\/\/(www.)?
- *
- * Every matcher is matched against the following attributes:
- *
- * href, src, data-url
- *
- * You must not include the pattern to match attributes.
- * They are automatically handled when a matcher is run.
- *
- * For a completely custom pattern, put !! (two excl. characters) anywhere in it:
- *
- * [/!!https:\/\/cyberfile.su\/\w+(?=")/, /cyberfile.su\/folder\//]
- *
- * @signature string The name and categories of the host, separated by a colon.
- * @matchers array The name and categories of the host, separated by a colon.
- *
- * Matchers can include the following options anywhere
- * (preferably where it doesn't break the pattern) within a pattern.
- *
- * @option <no_qs> Removes query string
- * @option <keep_ts> Keeps the trailing slash
- *
- * The following placeholders can be used inside any matcher pattern:
- *
- * @placeholder ~an@ -> a-zA-Z0-9
- *
- */
-
+// Entries: ['Name:singleCategory,albumCategory', [singlePattern, optionalAlbumPattern]].
+// The album category defaults to the single category; categories are display labels.
+// Patterns match post HTML in data-url/src/href attributes or as HTTP(S) URLs with optional www.
+// Use !! for a custom pattern without those wrappers; all patterns run with igs flags.
+// DSL: ~an@ expands to a-zA-Z0-9; <no_qs> strips query strings; <keep_ts> preserves trailing slashes.
+// Options may appear anywhere in a pattern and are removed before compilation.
 const hosts = [
   ['Simpcity:Attachments', [/(\/attachments\/|\/data\/video\/)/]],
   ['Coomer:Profiles', [/coomer.st\/[~an@._-]+\/user/]],
@@ -2510,7 +2080,7 @@ const hosts = [
   ],
   ['Goonbox:image', [/goonbox\.cr\/img\//, /goonbox\.cr\/a\//]],
   ['kemono:direct link', [/.{2,6}\.kemono.cr\/data\//]],
-  ['Postimg:image', [/!!https?:\/\/(www.)?i\.?(postimg|pixxxels).cc\/(.{8})/]], //[/!!https?:\/\/(www.)?postimg.cc\/(.{8})/]],
+  ['Postimg:image', [/!!https?:\/\/(www.)?i\.?(postimg|pixxxels).cc\/(.{8})/]],
   [
     'Ibb:image',
     [
@@ -2558,18 +2128,6 @@ const hosts = [
   ['Spankbang:video', [/spankbang.com\/.*?\/video/]],
 ];
 
-/**
- * An array of url resolvers.
- *
- * @type {((RegExp[]|(function(*): *))[]|(RegExp[]|(function(*, *): Promise<{dom: *, source: *, folderName: *, resolved}>))[]|(RegExp[]|(function(*, *): Promise<string>))[]|(RegExp[]|(function(*, *): Promise<{dom: *, source: *, folderName: *, resolved}>))[]|(RegExp[]|(function(*): *))[])[]}
- */
-/* -------------------------------------------------------------------------
- * Turbo sign hardening:
- * - timeout 5000ms
- * - retry 2x with jitter delay 700–1400ms
- * This avoids rare ~50s "waiting" stalls on https://turbo.cr/api/sign
- * ------------------------------------------------------------------------- */
-
 const XFPD_TURBO_SIGN_TIMEOUT_MS = 5000;
 const XFPD_TURBO_SIGN_RETRIES = 2;
 const XFPD_TURBO_SIGN_JITTER_MIN_MS = 700;
@@ -2592,12 +2150,12 @@ const xfpdGmGetText = (getUrl, headers, timeoutMs) =>
         responseType: 'text',
         anonymous: false,
         timeout: Number(timeoutMs) || 0,
-        onload: r => resolve({ ok: true, status: r.status || 0, text: String(r.responseText || r.response || '') }),
-        onerror: () => resolve({ ok: false, status: 0, text: '' }),
-        ontimeout: () => resolve({ ok: false, status: 0, text: '' }),
+        onload: response => resolve({ status: response.status || 0, text: String(response.responseText || response.response || '') }),
+        onerror: () => resolve({ status: 0, text: '' }),
+        ontimeout: () => resolve({ status: 0, text: '' }),
       });
     } catch (e) {
-      resolve({ ok: false, status: 0, text: '' });
+      resolve({ status: 0, text: '' });
     }
   });
 
@@ -2618,19 +2176,15 @@ const xfpdTurboFetchSignJsonWithTimeout = async (turboId, refererUrl) => {
 
   for (let attempt = 0; attempt <= XFPD_TURBO_SIGN_RETRIES; attempt++) {
     for (const signUrl of signUrls) {
-      const r = await xfpdGmGetText(signUrl, headers, XFPD_TURBO_SIGN_TIMEOUT_MS);
-      if (!r || !r.ok || r.status !== 200 || !r.text) continue;
+      const response = await xfpdGmGetText(signUrl, headers, XFPD_TURBO_SIGN_TIMEOUT_MS);
+      if (response.status !== 200 || !response.text) continue;
 
-      let j = null;
       try {
-        j = JSON.parse(r.text);
-      } catch (e) {
-        j = null;
+        const data = JSON.parse(response.text);
+        if (data?.url && (data.success === undefined || data.success)) return data;
+      } catch {
+        // Invalid JSON can be a temporary gate; try the next endpoint.
       }
-      if (!j || !j.url) continue;
-
-      const ok = j.success === undefined ? true : !!j.success;
-      if (ok) return j;
     }
     if (attempt < XFPD_TURBO_SIGN_RETRIES) {
       await xfpdSleepMs(xfpdJitterMs(XFPD_TURBO_SIGN_JITTER_MIN_MS, XFPD_TURBO_SIGN_JITTER_MAX_MS));
@@ -2640,14 +2194,14 @@ const xfpdTurboFetchSignJsonWithTimeout = async (turboId, refererUrl) => {
 };
 
 const xfpdTurboSignUrlWithTimeout = async (turboId, refererUrl, nameHint) => {
-  const j = await xfpdTurboFetchSignJsonWithTimeout(turboId, refererUrl);
-  if (!j || !j.url) return null;
+  const data = await xfpdTurboFetchSignJsonWithTimeout(turboId, refererUrl);
+  if (!data) return null;
 
-  let signed = j.url;
-  const originalName = j.original_filename || nameHint;
+  let signed = data.url;
+  const originalName = data.original_filename || nameHint;
 
   // Preserve filename for Turbo CDN downloads (used later for saveAs)
-  if (signed && originalName && !/[?&]fn=/.test(String(signed))) {
+  if (originalName && !/[?&]fn=/.test(String(signed))) {
     const enc = encodeURIComponent(String(originalName)).replace(/%20/g, '+');
     signed += (signed.includes('?') ? '&' : '?') + 'fn=' + enc;
   }
@@ -2939,9 +2493,7 @@ resolvers.push([
     try {
       const { dom } = await http.get(url);
       return dom.querySelector('.header-content-right > a').getAttribute('href');
-    } catch (err) {
-      url => url;
-    }
+    } catch (err) {}
   },
 ]);
 
@@ -3061,8 +2613,7 @@ resolvers.push([
       const id = index > -1 ? segments.slice(index + 1).join('/') : segments.pop();
       let bunkrDataId = null;
 
-      // Best-effort: read the human filename from the view page (og:title / h1 / <title>).
-      // This lets us rename CDN GUID links back to the original filename.
+      // Recover the original filename before resolution replaces it with a CDN GUID.
       try {
         const strip = s =>
           String(s || '')
@@ -3087,7 +2638,7 @@ resolvers.push([
             const dom = viewRes?.dom;
             const viewSource = viewRes?.source || '';
 
-            // If Cloudflare interstitial is active, don't capture a bogus "Just a moment..." title as a filename hint.
+            // A Cloudflare page title is not a filename.
             if (xfpdLooksLikeCfChallenge(viewSource, dom)) continue;
 
             if (!bunkrDataId) {
@@ -3199,7 +2750,7 @@ resolvers.push([
     const resolved = [];
     const seen = new Set();
 
-    // Bunkr album: keep the human filename from the album grid (title / .theName) and attach it to resolved CDN URLs.
+    // Album-grid names survive resolution to CDN GUID URLs.
     const nameHintBySlug = new Map();
 
     let firstDom = null;
@@ -3244,7 +2795,6 @@ resolvers.push([
           const slug = m[2];
           slugs.push(slug);
 
-          // Name hint is visible on /a/ pages (e.g. <div title="...mp4"> or .theName). Use it later when we only have a CDN GUID URL.
           try {
             let hint = c?.getAttribute?.('title') || '';
             if (!hint) hint = c?.querySelector?.('.theName')?.textContent || '';
@@ -3376,7 +2926,7 @@ resolvers.push([
       if (!fresh.length) break;
 
       const urls = await asyncPool(CONCURRENCY, fresh, async slug => {
-        // Fetch /f/{slug} to get the numeric file ID required by the new API.
+        // The API requires the numeric file ID from /f/{slug}.
         const fileBase = String(albumBaseChosen || origin || 'https://bunkr.cr').replace(/\/$/, '');
         const filePageUrl = `${fileBase}/f/${slug}`;
         let dataId = null;
@@ -3564,9 +3114,7 @@ resolvers.push([
 
     let tries = 0;
 
-    // Scumbag pornhub won't send the right json link the first time.
-    // Still, there are ocassional 403s / redirects.
-    // TODO: Fix me
+    // The media endpoint can initially return invalid JSON, 403s or redirects.
     do {
       const infoURL = await resolvePH(url);
 
@@ -3621,17 +3169,10 @@ resolvers.push([
       return await http.base(method, url, {}, headers, data, responseType);
     };
 
-    // GoFile no longer uses the static appdata.wt from config.js for /contents.
-    // The website now derives a per-request X-Website-Token from the account token
-    // via generateWT() in https://gofile.io/js/wt.obf.js, i.e.:
-    //   WT = sha256(navigator.userAgent + "::" + navigator.language + "::" + token + "::<time>::<salt>")
-    // <time> is NOT a static value -- it's Math.floor(Date.now() / 1000 / 14400) (a
-    // 4-hour bucket), recomputed live inside generateWT() itself. <salt> is the one
-    // actual fixed constant, which can still change whenever GoFile updates the file.
-    // We trust GoFile's script to compute this token, as its website does. Function
-    // keeps the declaration local but is not a sandbox. Only fetch website scripts
-    // from GoFile itself, and cache source rather than a time-dependent token.
-    // WT must use the same UA/language as the request; X-BL echoes the language.
+    // GoFile's generateWT() uses the account token, UA/language, a live 4-hour
+    // bucket and a rotating salt. Cache its source, never the time-dependent token.
+    // Function is not a sandbox: load only GoFile's own script.
+    // Requests must use the same UA/language; X-BL echoes the language.
     let cachedGenerateWT = null;
 
     const getGenerateWT = async (force = false) => {
@@ -3687,8 +3228,7 @@ resolvers.push([
 
       const token = json.data.token;
 
-      // Sync/activate the fresh guest token server-side. The website does this via
-      // GET /accounts/website before it will resolve /contents for that token.
+      // Activate the guest token before requesting /contents.
       try {
         await gmReq(
           'GET',
@@ -3709,8 +3249,7 @@ resolvers.push([
     };
 
     const getAccountToken = async (force = false) => {
-      // If the user provided a personal Bearer token, always use it.
-      // (This is optional; leaving it empty keeps the anonymous account-token flow.)
+      // A personal Bearer token takes precedence over guest credentials.
       let token = null;
       try {
         const override = settings?.hosts?.goFile?.bearerOverride;
@@ -4079,7 +3618,6 @@ resolvers.push([
   async (url, http) => {
     const { dom, source } = await http.get(url);
 
-    // Album folder naming (stable + readable): turbo_<albumId> - <title>
     const mAlbum = url.match(/\/a\/([^\/?#]+)/i);
     const albumId = mAlbum ? mAlbum[1] : null;
     const base = albumId ? `turbo_${albumId}` : 'turbo_album';
@@ -4100,19 +3638,16 @@ resolvers.push([
       folderName = `${safeTitle} - ${base}`;
     }
 
-    // Final sanitize (defensive)
     folderName = folderName
       .replace(/[\\/:*?"<>|]/g, invalidSub)
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Hard cap for safety
     if (folderName.length > 180) folderName = folderName.slice(0, 180).trim();
 
     // Map videoId -> original filename (from album HTML)
     const idToName = new Map();
 
-    // Collect video ids (and names) from the table rows (server-rendered HTML)
     let ids = Array.from(dom?.querySelectorAll('tr.file-row') || [])
       .map(row => {
         const a = row.querySelector('a[href^="/v/"]');
@@ -4154,7 +3689,7 @@ resolvers.push([
         } catch (e) {}
       }
 
-      // If we got a Turbo CDN URL and have an original name, attach fn=
+      // Preserve album filenames when the CDN path contains only an ID.
       if (signed && /turbocdn\.st/i.test(signed)) {
         const originalName = idToName.get(id);
         if (originalName && !/[?&]fn=/.test(signed)) {
@@ -4163,7 +3698,6 @@ resolvers.push([
         }
       }
 
-      // If sign fails, keep a workable fallback
       if (signed && id) {
         try {
           turboIdBySignedUrl.set(String(signed), String(id));
@@ -4482,8 +4016,7 @@ resolvers.push([
 resolvers.push([
   [/fs-\d+\.cyberdrop\.[a-z]{2,}\/|cyberdrop\.[a-z]{2,}\/a\//],
   async (url, http, passwords, postId, postSettings, progressCB) => {
-    // Cyberdrop albums (/a/<id>) are HTML pages listing many /f/<id> file links.
-    // Resolve the album to a list of signed CDN URLs via the file auth API (no per-file warm-up tabs).
+    // Resolve album file links through the auth API without per-file warm-up tabs.
     try {
       url = String(url || '').trim();
       if (url.startsWith('//')) url = 'https:' + url;
@@ -4559,7 +4092,6 @@ resolvers.push([
         const m3 = src.match(/<title[^>]*>([^<]+)<\/title>/i);
         let t = (m1 && (m1[1] || m1[2])) || (m2 && m2[1]) || (m3 && m3[1]) || '';
         t = decodeHtml(t).trim();
-        // Strip common site suffixes
         t = t
           .replace(/\s*\|\s*CyberDrop.*$/i, '')
           .replace(/\s*-\s*CyberDrop.*$/i, '')
@@ -4582,9 +4114,7 @@ resolvers.push([
           const nm = (a.getAttribute('title') || a.textContent || '').trim();
           if (nm) cyberdropNameBySlug.set(slug, nm);
         });
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
       // Regex fallback (in case DOMParser is blocked).
       try {
@@ -4595,9 +4125,7 @@ resolvers.push([
           const nm = decodeHtml(m[2]).trim();
           if (nm) cyberdropNameBySlug.set(slug, nm);
         }
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
       const host = (() => {
         try {
@@ -4671,12 +4199,8 @@ resolvers.push([
 resolvers.push([
   [/fs-\d+\.cyberdrop\.[a-z]{2,}\/|cyberdrop\.[a-z]{2,}\/(f|e)\//, /:!cyberdrop\.[a-z]{2,}\/a\//],
   async (url, http) => {
-    // Cyberdrop embeds (/e/) expose the real file URL only after loading the /f/ page.
-    // Preferred approach:
-    //  1) Call the info API to get the signed CDN URL
-    //  2) If blocked, briefly warm up /f/ in an inactive tab and retry once
+    // Resolve via the API first; if blocked, warm up /f/ and retry once.
     try {
-      // Ensure absolute URL (some posts omit the scheme, e.g. "cyberdrop.cr/e/<slug>")
       url = String(url || '').trim();
       if (url.startsWith('//')) url = 'https:' + url;
       if (!/^https?:\/\//i.test(url)) url = 'https://' + url.replace(/^\/+/, '');
@@ -4690,7 +4214,6 @@ resolvers.push([
       const origin = `${u.protocol}//${u.hostname}`;
       const slugMatch = String(url).match(/\/([ef])\/([^\/?#]+)/i);
       if (!slugMatch || !slugMatch[2]) {
-        // Not a /f/ or /e/ URL; return as-is.
         return url;
       }
 
@@ -4699,17 +4222,15 @@ resolvers.push([
 
       const apiCandidates = [];
 
-      // New API style (observed on cyberdrop.cr): https://api.cyberdrop.cr/api/file/info/<slug>
+      // Prefer this mirror's info/auth endpoints, then known and legacy variants.
       const root = (u.hostname.match(/cyberdrop\.[a-z]+$/i) || [null])[0];
       const apiBaseDefault = root ? `https://api.${root}` : 'https://api.cyberdrop.cr';
       if (root) {
         apiCandidates.push(`https://api.${root}/api/file/info/${slug}`);
         apiCandidates.push(`https://api.${root}/api/file/auth/${slug}`);
       }
-      // Known working for cyberdrop.cr even if the embed is on /e/
       apiCandidates.push(`https://api.cyberdrop.cr/api/file/info/${slug}`);
       apiCandidates.push(`https://api.cyberdrop.cr/api/file/auth/${slug}`);
-      // Additional API variants seen in the wild
       if (root) {
         apiCandidates.push(`https://api.${root}/api/file/url/${slug}`);
         apiCandidates.push(`https://api.${root}/api/file/${slug}`);
@@ -4719,7 +4240,7 @@ resolvers.push([
       apiCandidates.push(`https://api.cyberdrop.cr/api/file/auth/${slug}`);
       apiCandidates.push(`https://api.cyberdrop.cr/api/file/${slug}`);
 
-      // Legacy API style (older Cyberdrop): https://cyberdrop.me/api/f/<slug>
+      // Legacy mirrors expose /api/f/ on the page origin.
       apiCandidates.push(`${origin}/api/f/${slug}`);
 
       const headers = {
@@ -4762,7 +4283,7 @@ resolvers.push([
           const apiBase = typeof baseHint === 'string' && /^https?:\/\//i.test(baseHint) ? baseHint.replace(/\/$/, '') : apiBaseDefault;
           if (!s) return out;
 
-          // 1) Quick regex for absolute token URL (unescaped or JSON-escaped)
+          // Prefer absolute token URLs, including JSON-escaped forms.
           const rePlain = new RegExp(`https?:\/\/[^"'\\s]+\/api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
           let m = s.match(rePlain);
           if (m && m[0]) out.direct = m[0];
@@ -4773,7 +4294,7 @@ resolvers.push([
             if (m && m[0]) out.direct = m[0].replace(/\\\//g, '/');
           }
 
-          // 2) Relative token URL (e.g. "/api/file/d/<slug>?token=...")
+          // Relative token URLs belong to the API origin that returned them.
           if (!out.direct) {
             const reRel1 = new RegExp(`\/api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
             m = s.match(reRel1);
@@ -4786,7 +4307,7 @@ resolvers.push([
             if (m && m[0]) out.direct = `${apiBase}/${m[0].replace(/^\//, '')}`;
           }
 
-          // 3) JSON parse + deep scan for filename and/or token/host components
+          // Some responses separate filename, token, host and auth URL.
           try {
             const j = JSON.parse(s);
             const seen = new Set();
@@ -4801,9 +4322,7 @@ resolvers.push([
 
             const looksLikeJwt = v => {
               if (!v || typeof v !== 'string') return false;
-              // Typical JWT: header.payload.sig (base64url)
-              if (/^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v)) return true;
-              return false;
+              return /^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v);
             };
 
             const isTokenUrl = v => {
@@ -4827,7 +4346,6 @@ resolvers.push([
                   const uu = new URL(t);
                   return `${uu.protocol}//${uu.hostname}`;
                 }
-                // plain hostname
                 if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(t)) return `https://${t}`;
               } catch (e) {}
               return null;
@@ -4848,17 +4366,10 @@ resolvers.push([
                   }
                 }
 
-                // token can be stored separately (e.g. "token": "eyJ...")
-                if (!out.token) {
-                  if (/(^|[^a-z])token([^a-z]|$)/i.test(String(key)) && looksLikeJwt(v)) {
-                    out.token = v;
-                  } else if (looksLikeJwt(v)) {
-                    // last resort: any JWT-looking string
-                    out.token = v;
-                  }
-                }
+                // Tokens may be separate from the URL, under arbitrary keys.
+                if (!out.token && looksLikeJwt(v)) out.token = v;
 
-                // auth URL can be provided separately (new API flow: info -> auth -> direct)
+                // Some info responses require a second request to an auth URL.
                 if (!out.auth) {
                   if (/(^|[^a-z])auth([^a-z]|$)/i.test(String(key)) && /\/api\/file\/auth\//i.test(v)) {
                     out.auth = v;
@@ -4902,7 +4413,7 @@ resolvers.push([
               if (direct && typeof direct === 'string') out.direct = direct;
             }
 
-            // Common auth URL fields (new Cyberdrop API flow: info -> auth -> direct)
+            // Explicit auth fields can supply URLs missed by the scan.
             if (!out.auth) {
               const a =
                 (j &&
@@ -4932,7 +4443,6 @@ resolvers.push([
               if (n && typeof n === 'string' && looksLikeName(n)) out.name = n.split(/[\\/]/).pop();
             }
 
-            // If we got token but not direct, try to build a direct URL
             if (!out.direct && out.token) {
               const tok = out.token.includes('%') ? out.token : encodeURIComponent(out.token);
               const base = out.base || apiBase;
@@ -4940,12 +4450,10 @@ resolvers.push([
             }
           } catch (e) {}
 
-          // Normalize escaped slashes if needed
           if (out.direct && typeof out.direct === 'string' && out.direct.includes('\\/')) {
             out.direct = out.direct.replace(/\\\//g, '/');
           }
 
-          // If out.direct is relative, make it absolute
           if (out.direct && typeof out.direct === 'string' && out.direct.startsWith('/')) {
             out.direct = `${apiBase}${out.direct}`;
           }
@@ -4979,7 +4487,7 @@ resolvers.push([
             let resolvedName = name || null;
             let resolvedDirect = direct || null;
 
-            // New flow: info returns auth_url; auth returns tokenized direct URL
+            // info -> auth -> tokenized direct URL.
             if (!resolvedDirect && auth && typeof auth === 'string') {
               const authUrl = auth;
               try {
@@ -5042,8 +4550,7 @@ resolvers.push([
 
     const { source } = await http.get(playerIFrameUrl);
 
-    // noinspection JSCheckFunctionSignatures
-    const props = JSON.parse(source || JSON.stringify([]));
+    const props = JSON.parse(source || '[]');
 
     if (props.sources && props.sources.length) {
       return props.sources[0].file;
@@ -5144,12 +4651,7 @@ resolvers.push([
     // If it's already absolute, keep it (don't rewrite hosts).
     if (/^https?:\/\//i.test(url)) return url;
 
-    // Otherwise it's a path; prefix with Simpcity origin.
     if (!url.startsWith('/')) url = '/' + url;
-
-    if (url.startsWith('/attachments/') || url.startsWith('/data/video/')) {
-      return `https://simpcity.su${url}`;
-    }
 
     return `https://simpcity.su${url}`;
   },
@@ -5210,14 +4712,12 @@ resolvers.push([
             s = String(s || '').trim();
             if (!s) return '';
 
-            // Strip common suffixes.
             s = s.replace(/\s*\|\s*filester\.(me|sh|si|gg)\s*$/i, '').trim();
             s = s.replace(/\s*-\s*filester\.(me|sh|si|gg)\s*$/i, '').trim();
 
             // Replace remaining pipes with a Windows-safe separator.
             if (s.includes('|')) s = s.replace(/\s*\|\s*/g, ' - ').trim();
 
-            // Final cleanup
             s = s.replace(/\s+/g, ' ').trim();
 
             return s;
@@ -5758,10 +5258,7 @@ if (typeof module !== 'undefined' && module.exports) {
   };
 }
 
-// Per-post processing lifecycle: marks a post active while it downloads and
-// guarantees GoFile cookie restoration even when the task throws. The state
-// array and restore function are injectable for tests; in the built userscript
-// they default to init.js's `processing` and host-caches.js's `gofileRestoreCookie`.
+// Track active posts so shared GoFile credentials outlive concurrent downloads.
 const setProcessing = (isProcessing, postId, state = processing) => {
   const p = state.find(p => p.postId === postId);
   if (p) {
@@ -5777,9 +5274,7 @@ const runWithPostProcessing = async (postId, task, state = processing, restoreCo
     return await task();
   } finally {
     setProcessing(false, postId, state);
-    // Restore the GoFile accountToken cookie only when this was the last active post.
-    // A restore failure is swallowed: a successful download stays successful and a
-    // task failure is rethrown unchanged.
+    // Restore only after the last active post, without masking the task's result or error.
     if (!state.some(p => p.processing)) {
       try {
         await restoreCookie();
@@ -5791,9 +5286,6 @@ const runWithPostProcessing = async (postId, task, state = processing, restoreCo
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { setProcessing, runWithPostProcessing };
 }
-
-// Post resolution: hint capture, resolver invocation, and duplicate removal.
-// Pure-ish module-level functions over the shared hint maps; no GM_* access.
 
 const captureDownloadHints = parsedPost => {
   try {
@@ -5974,9 +5466,8 @@ const resolveDownloadResources = async ({ parsedPost, enabledHosts, resolvers, p
   return resolved;
 };
 
-// Case-insensitive basename dedupe over the url-filtered list. Keeps the same
-// sorted order and therefore the same retained occurrence as before; never
-// mutates input objects. Returns the original array when nothing was removed.
+// Keep the first case-insensitive basename in host-sorted order.
+// Preserve array identity when nothing is removed; never mutate input objects.
 const removeDuplicateDownloadResources = (resources, { postId, postNumber, statusLabel }) => {
   const unique = [];
   const seen = new Set();
@@ -6003,8 +5494,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { captureDownloadHints, resolveDownloadResources, removeDuplicateDownloadResources };
 }
 
-// Per-download metadata (size/name/status) with a per-instance cache. The cache
-// is fresh per download batch so re-resolved URLs always get fresh HEADs.
+// Cache metadata per batch so re-resolved URLs receive fresh HEAD requests.
 const gmDownloadHead = url =>
   new Promise(resolve => {
     try {
@@ -6093,7 +5583,7 @@ const createDownloadMetadataReader = () => {
           } catch (e) {
             hintedName = '';
           }
-          if (hintedName) meta.filename = String(hintedName);
+          if (hintedName) meta.filename = hintedName;
         }
       } catch (e) {}
 
@@ -6126,9 +5616,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { gmDownloadHead, gmDownloadText, createDownloadMetadataReader };
 }
 
-// Single source of truth for per-run download naming. Direct and blob downloads
-// used to duplicate this logic; both now flow through plan(). The planner owns
-// the per-run filenames/mimeTypes capture arrays and both uniqueness sets.
+// Direct and blob downloads share per-run filename hints and uniqueness sets.
 const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFirefox }) => {
   const filenames = [];
   const mimeTypes = [];
@@ -6168,7 +5656,6 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
     }
   };
 
-  // Shared tail of the direct pipeline: fold the basename into a save path.
   const planDirect = ({ resource, url, meta = {} }) => {
     const isGoFile = isGoFileUrl(url);
     const isPixeldrain = isPixeldrainUrl(url);
@@ -6179,7 +5666,6 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
       /bunkr/i.test(String((resource && resource.original) || ''));
     const isFilester = String((resource && resource.host && resource.host.name) || '').toLowerCase() === 'filester' || isFilesterUrl(url);
 
-    // Try to reuse the existing GoFile filename hints, if available.
     let filename = filenames.find(f => f.url === url);
     if (!filename && isGoFile) {
       const mGf = String(url).match(/\/download\/(?:web|direct)\/([^\/?#]+)\//i);
@@ -6341,8 +5827,7 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
       if (gid) {
         filename = filenames.find(f => f && f.gofileId === gid);
 
-        // If the per-run filenames list doesn't know this URL (e.g. re-resolved host),
-        // fall back to the global GoFile hint maps populated during /d/ resolution.
+        // Resolver hints survive CDN host changes.
         if (!filename) {
           const hinted = gofileNameById.get(String(gid)) || gofileNameByUrl.get(String(url));
           if (hinted) {
@@ -6404,8 +5889,7 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
         basename = basename.replace(basename_ext, '').replace(/(\.\w{3,6}-\w{8}$)|(-\w{8}$)/, '') + basename_ext;
       }
     } else {
-      // Turbo CDN signed URLs include the original filename in the fn= query param.
-      // Without this, we'd end up saving as the short id (e.g. uVOxoqFFlDGrZ.mp4).
+      // Turbo's fn= carries the original filename; the CDN path contains only an ID.
       if (url.includes('turbocdn.st')) {
         const m = url.match(/[?&]fn=([^&]+)/i);
         if (m && m[1]) {
@@ -6548,8 +6032,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { createDownloadNamePlanner };
 }
 
-// Filester: classification, album ZIP-vs-DIRECT policy (applied once per post,
-// not once per batch), /d/->v2 token preparation, and bounded DIRECT preflight.
+// Filester album policy, just-in-time token resolution and bounded DIRECT preflight.
 const FIL_IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif', '.tif', '.tiff', '.jxl', '.heic', '.heif']);
 const FIL_VID_EXTS = new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.3gp']);
 
@@ -6608,15 +6091,10 @@ const classifyFilesterDownload = (url, filenameHint = '') => {
 const isFilesterAlbumOriginal = s =>
   /(?:^|\/\/)(?:www\.)?filester\.(me|sh|si|gg)\/f\//i.test(String(s || '')) || /filester\.(me|sh|si|gg)\/f\//i.test(String(s || ''));
 
-// Pure decision planner: given per-item kind ('image'|'video'|'other') and size
-// (0 = unknown), decide which items must leave the ZIP. Returns the ascending
-// indexes to force DIRECT plus the size totals used for logging.
+// Unknown sizes (0) cannot qualify an album for ZIP; return indexes requiring DIRECT.
 const planFilesterAlbum = (items, zipped, maxBytes) => {
   let hasImage = false;
   let hasNonImage = false;
-  let imgCount = 0;
-  let vidCount = 0;
-  let otherCount = 0;
   let totalSize = 0;
   let unknownSize = 0;
 
@@ -6624,13 +6102,8 @@ const planFilesterAlbum = (items, zipped, maxBytes) => {
     const kind = it.kind || 'other';
     if (kind === 'image') {
       hasImage = true;
-      imgCount++;
-    } else if (kind === 'video') {
-      hasNonImage = true;
-      vidCount++;
     } else {
       hasNonImage = true;
-      otherCount++;
     }
 
     const sz0 = Number(it.size) || 0;
@@ -6667,9 +6140,7 @@ const planFilesterAlbum = (items, zipped, maxBytes) => {
   return { forceDirectIndexes, totalSize, unknownSize };
 };
 
-// ONE pass over the resolved resources (defect fix: the old code ran this inside
-// the per-batch loop, re-probing and re-deciding for every batch). Groups by the
-// original /f/ album URL; bounded unknown-size HEAD probes (<=10 items / <=25 total).
+// Decide once per post, grouped by original album URL, before transfer batching.
 const applyFilesterAlbumPolicy = async (resources, { zipped, readMetadata, postId, postNumber }) => {
   try {
     const albumItems = resources.filter(r => r && r.url && isFilesterAlbumOriginal(r.original));
@@ -6692,8 +6163,7 @@ const applyFilesterAlbumPolicy = async (resources, { zipped, readMetadata, postI
         if (!(sizes[i] > 0)) unknownItems.push({ it: items[i], index: i });
       }
 
-      // Best-effort: only attempt HEAD for missing sizes on small albums.
-      // (Avoids 100x HEAD calls on huge albums; in that case we default to the safer policy.)
+      // Bound HEAD probes on large albums; unknown sizes retain the safer policy.
       if (unknownItems.length && unknownItems.length <= 10 && items.length <= 25) {
         for (const u of unknownItems) {
           const meta = await readMetadata(u.it.url);
@@ -6860,9 +6330,7 @@ if (typeof module !== 'undefined' && module.exports) {
   };
 }
 
-// DIRECT download pipeline (GM_download plus the Firefox Imagebam blob path).
-// Everything that can settle the attempt settles exactly once via actions.settle;
-// warm-up and preflight paths schedule pass 2 without settling.
+// DIRECT callbacks settle once; warm-up retries leave settlement to the next pass.
 const downloadResourceDirect = async (run, batch, attempt, metaHint, actions) => {
   const { postId, postNumber, postSettings, statusUI, threadTitle, isFirefox, names } = run;
   const { url, host, original, folderName, pass, isGoFile, isPixeldrain, isTurbo, isFilester, reflink, ellipsedUrl, resource } = attempt;
@@ -6913,8 +6381,7 @@ const downloadResourceDirect = async (run, batch, attempt, metaHint, actions) =>
     let directUrl = String(url);
     let filesterDirectPreflightDone = false;
 
-    // Filester DIRECT: retry a few times on transient HTTP errors (429/400/etc) and rotate cache hosts (cache6 <-> cache1 ...)
-    // before starting GM_download. Keeps pauses short (<=~2s).
+    // Preflight with bounded retries; rotate only legacy cache-host tokens.
     if (isFilester) {
       const sel = await selectFilesterDirectUrl(url, resource, { postId, postNumber });
       directUrl = sel.directUrl;
@@ -6965,8 +6432,7 @@ const downloadResourceDirect = async (run, batch, attempt, metaHint, actions) =>
       },
     };
     if (imagebamHeaders && isFirefox) {
-      // Imagebam CDN often blocks hotlinking without a Referer. In Firefox, GM_download headers
-      // are unreliable, so fetch as a blob with GM_xmlhttpRequest (with Referer) then save.
+      // Firefox GM_download may drop Imagebam's required Referer; fetch a blob first.
       try {
         GM_xmlhttpRequest({
           method: 'GET',
@@ -7022,8 +6488,7 @@ const downloadResourceDirect = async (run, batch, attempt, metaHint, actions) =>
     } else {
       if (imagebamHeaders) dlOpts.headers = { ...(dlOpts.headers || {}), ...imagebamHeaders };
 
-      // Filester (Chrome): preflight a 1-byte range request to capture the final URL.
-      // This helps when the downloads API drops cookies or when Filester redirects to a signed URL.
+      // Chrome may drop cookies: a one-byte preflight captures the signed redirect URL.
       if (isFilester && !isFirefox && !filesterDirectPreflightDone) {
         try {
           const ref = String(filesterRefByUrl.get(String(url)) || (resource && resource.original) || 'https://filester.me/');
@@ -7182,10 +6647,8 @@ const classifyDownloadAttempt = (resource, pass) => {
   };
 };
 
-// Terminal accounting: increments run.completed and batch.completed exactly once.
-// Optional UI/log fields reproduce each current branch, including bare-count
-// branches that repaint nothing. resetBatchOnFull mirrors the stall-path quirk
-// where the batch counter is zeroed once it reaches the batch length.
+// Callers own exactly-once settlement; UI/log updates are optional.
+// Stall paths reset the batch counter when it reaches the batch length.
 const settleDownloadAttempt = (run, batch, attempt, outcome = {}) => {
   const { statusColor, updateStatus, updateTotalProgress, log: logMsg, guardCompleted, resetBatchOnFull } = outcome;
 
@@ -7273,9 +6736,7 @@ const runDownloadTransfers = async run => {
       let url = attempt.url;
       const zippedForThis = !!(postSettings.zipped && !(resource && (resource.forceDirect || resource.forceUnzipped)));
 
-      // GoFile: make sure the browser's accountToken cookie matches the token that
-      // resolved this album BEFORE the first request (store links gate on this too,
-      // not just DIRECT) -- see gofileSyncCookie definition for why.
+      // Both blob and DIRECT requests need the GoFile cookie used during resolution.
       if (isGoFile) {
         try {
           const gfToken = settings?.hosts?.goFile?.token;
@@ -7335,7 +6796,6 @@ const runDownloadTransfers = async run => {
         downloadResourceDirect(run, batchState, attempt, metaHint, actions);
       };
 
-      // Forced DIRECT (used by Filester album policy: mixed albums, unzipped mixed/video-only, etc.)
       if (resource && resource.forceDirect) {
         log.post.info(postId, `::Forced DIRECT (skip blob/ZIP)::: ${url}`, postNumber);
         setTimeout(() => startDirectDownload(), TURBO_DIRECT_DELAY_MS);
@@ -7395,7 +6855,7 @@ const runDownloadTransfers = async run => {
             color: '#469cf3',
           });
 
-          // Pixeldrain/GoFile: if size only becomes known mid-download and it's > ~1.6GB, switch to direct download.
+          // A late size report can exceed the blob limit; hand completion to DIRECT.
           if (
             !switchedToDirect &&
             (isGoFile || attempt.isPixeldrain || isFilester) &&
@@ -7449,9 +6909,7 @@ const runDownloadTransfers = async run => {
           if (switchedToDirect) return;
 
           if (abortReason === 'bunkr_maint' && bunkrMaintenanceHandled) return;
-          // GoFile: this pass was superseded by a stall-triggered warm-up retry
-          // (request.abort() above isn't always reliable once a blob response is
-          // substantially buffered) -- a newer pass now owns saving this file.
+          // Buffered responses can survive abort(); only the newest GoFile pass may save.
           if (isGoFile && (batchState.gofileActivePass.get(url) || pass) > pass) return;
 
           // GoFile: detect soft-block / HTML gate
@@ -7470,7 +6928,6 @@ const runDownloadTransfers = async run => {
                 return;
               }
 
-              // Retry failed -> mark as unsuccessful and continue.
               actions.settle(attempt, {
                 statusColor: '#b23b3b',
                 updateStatus: true,
@@ -7503,7 +6960,6 @@ const runDownloadTransfers = async run => {
                 return;
               }
 
-              // Retry failed -> mark as unsuccessful and continue.
               actions.settle(attempt, {
                 statusColor: '#b23b3b',
                 updateStatus: true,
@@ -7575,8 +7031,7 @@ const runDownloadTransfers = async run => {
                   }
                 }
 
-                // Filester: retry a few times on transient HTTP errors (429/400/etc) before switching to DIRECT.
-                // Keep pauses short (<=~2.5s) and try alternate cacheN hosts (cache6 <-> cache1) when possible.
+                // Retry transient errors with bounded delays and alternate legacy cache hosts.
                 if (badStatus) {
                   const st0 = Number(response.status || 0) || 0;
                   const isRetryable =
@@ -7656,7 +7111,6 @@ const runDownloadTransfers = async run => {
 
                     if (a0 <= max0) {
                       const tgt = nextUrl || String(url || '');
-                      // retry logging: include cache switch info (cache6<->cache1 etc.)
                       let switchInfo = '';
                       try {
                         const fromU = String(url || '');
@@ -7780,7 +7234,6 @@ const runDownloadTransfers = async run => {
             }
           }
 
-          // Success path (unchanged)
           actions.settle(attempt, { statusColor: '#2d9053', updateStatus: true, updateTotalProgress: true });
 
           const planned = run.names.plan({
@@ -7902,7 +7355,7 @@ const runDownloadTransfers = async run => {
                 }
               } catch (e) {}
 
-              // Retry once (even if we couldn't re-sign, a plain retry sometimes works).
+              // Retry even if re-signing failed; the current URL may still work.
               setTimeout(() => startDownload(resource, pass + 1), st.resign >= 3 ? TURBO_RETRY_DELAY_MS * 2 : TURBO_RETRY_DELAY_MS);
               return;
             }
@@ -7925,18 +7378,12 @@ const runDownloadTransfers = async run => {
             return;
           }
 
-          // Make stalls visible instead of silently counting a failed download as
-          // complete (previously only GoFile logged this; every other host -- Bunkr
-          // included -- fell through to completed++ with no indication of failure).
           log.post.error(postId, `::Stalled/Failed::: ${url}`, postNumber);
 
           if (isGoFile && pass === 1 && !batchState.gofileWarmupAttempted.has(url)) {
             batchState.gofileWarmupAttempted.add(url);
             log.post.info(postId, `::GoFile stalled -> warm-up tab (${GOFILE_WARMUP_MS}ms) then retry [1/2]::: ${url}`, postNumber);
-            // request.abort() above isn't always reliable once a blob response is
-            // substantially buffered -- mark pass 2 as authoritative so a zombie
-            // pass-1 onload (see the isGoFile guard at the top of onload) can't
-            // also save the file.
+            // abort() may leave a buffered onload; pass 2 alone owns saving the file.
             batchState.gofileActivePass.set(url, 2);
             gofileWarmupOpenTab(url);
             setTimeout(() => startDownload(resource, 2), GOFILE_WARMUP_MS);
@@ -7968,9 +7415,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { classifyDownloadAttempt, runDownloadTransfers, settleDownloadAttempt };
 }
 
-// Generated artifacts: log.txt / links.txt, the main ZIP, and generated.zip.
-// Reads window.logs explicitly (never the bare `logs` alias) and preserves the
-// Firefox/Chromium save names plus the skip-empty-ZIP behavior.
+// Read window.logs directly: lifecycle cleanup replaces the array.
 const finalizeDownloadArtifacts = async (run, customFilename) => {
   const {
     postId,
@@ -8004,11 +7449,9 @@ const finalizeDownloadArtifacts = async (run, customFilename) => {
 
     const mainZipName = customFilename || `${title} #${postNumber}.zip`;
     const generatedZipName = `${title} #${postNumber} generated.zip`;
-    // Original (single ZIP) behavior.
     const needZipBlob = postSettings.generateLog || postSettings.generateLinks || (postSettings.zipped && zipFileCount > 0);
 
-    // If "Zipped" is enabled but nothing was added to the ZIP (e.g. everything was saved via DIRECT),
-    // skip creating an empty ZIP file.
+    // DIRECT-only runs may have no ZIP entries.
     if (postSettings.zipped && zipFileCount === 0 && !postSettings.generateLog && !postSettings.generateLinks) {
       log.post.info(postId, `::Zipped ON but nothing to zip (all DIRECT downloads) -> skipping ZIP::`, postNumber);
     }
@@ -8120,9 +7563,8 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { finalizeDownloadArtifacts };
 }
 
-// Thin orchestrator: wires the per-post pipeline together. All host resolution,
-// GoFile state, and artifact work runs inside runWithPostProcessing so cookie
-// restoration and the log cleanup are guaranteed even on early failures.
+// Keep resolution, transfers and artifacts inside the shared credential lifecycle.
+// Logs are cleared even if the pipeline fails.
 const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, getSettingsCB, statusUI, callbacks = {}) => {
   const { postId, postNumber } = parsedPost;
 
@@ -8132,7 +7574,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
 
       const enabledHosts = enabledHostsCB(parsedHosts);
 
-      // TODO: Fix this filth.
       window.logs = window.logs.filter(l => l.postId !== postId);
 
       log.separator(postId);
@@ -8204,8 +7645,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
 
       const isFF = window.isFF;
 
-      // Filester album policy runs exactly once per post (after dedupe, before batching)
-      // with its own metadata reader so no per-batch re-probes happen.
+      // Apply album policy once after dedupe, before splitting resources into batches.
       if (!postSettings.skipDownload) {
         const policyReader = createDownloadMetadataReader();
         await applyFilesterAlbumPolicy(resolved, {
@@ -8258,9 +7698,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
   }
 };
 
-/**
- * @param post
- */
 const addDuplicateTabLink = post => {
   const span = document.createElement('span');
   span.innerHTML = '<i class="fa fa-copy"></i> Duplicate Tab';
@@ -8278,9 +7715,6 @@ const addDuplicateTabLink = post => {
   post.parentNode.querySelector('.message-attribution-main').append(dupTabLI);
 };
 
-/**
- * @param post
- */
 const addShowDownloadPageBtnLink = post => {
   const span = document.createElement('span');
   span.innerHTML = '<i class="fa fa-arrow-up"></i> Download Page';
@@ -8298,7 +7732,6 @@ const addShowDownloadPageBtnLink = post => {
   post.parentNode.querySelector('.message-attribution-main').append(dupTabLI);
 };
 
-// TODO: Extract to ui.js
 const addDownloadPageButton = () => {
   const downloadAllButton = document.createElement('a');
   downloadAllButton.setAttribute('id', 'download-page');
@@ -8317,9 +7750,6 @@ const addDownloadPageButton = () => {
   return downloadAllButton;
 };
 
-/**
- * @param postFooter
- */
 const registerPostReaction = postFooter => {
   const hasReaction = postFooter.querySelector('.has-reaction');
   if (!hasReaction) {
@@ -8335,12 +7765,9 @@ const CYBERDROP_WARMUP_DEFAULT_MS = 2500;
 let cyberdropWarmupChain = Promise.resolve();
 const cyberdropWarmupAttempted = new Map();
 
-/**
- * Warm up a Cyberdrop /f/ page in a background tab to let the site set any required cookies.
- * Ensures at most one warm-up tab is open at any time.
- */
+// Let Cyberdrop set cookies in a background tab; serialize warmups so only one tab is open.
 async function cyberdropWarmupOnce(key, warmUrl, ms = CYBERDROP_WARMUP_DEFAULT_MS) {
-  // Back-compat: allow cyberdropWarmupOnce(url) calls.
+  // Also accepts a single warm-up URL.
   if (typeof warmUrl === 'undefined') {
     const maybeUrl = String(key || '').trim();
     if (/^https?:\/\//i.test(maybeUrl)) {
@@ -8353,7 +7780,7 @@ async function cyberdropWarmupOnce(key, warmUrl, ms = CYBERDROP_WARMUP_DEFAULT_M
     }
   }
 
-  // Normalize keys that accidentally include a full URL (avoid per-file warmups).
+  // Use origin-based keys to avoid warming up once per file.
   const _k0 = String(key || '').trim();
   if (_k0.indexOf('://') !== -1) {
     const m = _k0.match(/https?:\/\/[^\s]+/i);
@@ -8398,7 +7825,7 @@ async function cyberdropWarmupOnce(key, warmUrl, ms = CYBERDROP_WARMUP_DEFAULT_M
   await cyberdropWarmupChain;
 }
 
-// Legacy helper kept for compatibility (expects a Cyberdrop API URL that returns JSON with a "url" field).
+// Cyberdrop JSON endpoints may return the direct URL at url, data.url, or file.url.
 async function cyberdrop_helper(apiUrl) {
   const url = String(apiUrl || '');
   if (!url) return null;
@@ -8449,11 +7876,7 @@ const selectedPosts = [];
     return;
   }
 
-  // @match now covers gofile.io (required by GM_cookie for the accountToken sync -- see
-  // gofileSyncCookie), which also makes Tampermonkey inject/run this whole script on actual
-  // gofile.io page loads (e.g. the warm-up tab). None of the forum-post logic below applies
-  // there, so bail out immediately rather than doing pointless work (redgifs token fetch,
-  // style injection) on GoFile's own pages.
+  // GoFile is matched for GM_cookie access, not forum UI initialization.
   try {
     if (/(^|\.)gofile\.io$/i.test(location.hostname)) return;
   } catch (e) {}
@@ -8514,13 +7937,11 @@ const selectedPosts = [];
         return parsedHosts.filter(host => host.enabled && host.resources.length).reduce((acc, host) => acc + host.resources.length, 0);
       };
 
-      // Create and attach the download button to post.
       const { btn: btnDownloadPost } = ui.buttons.addDownloadPostButton(post);
       const totalResources = parsedHosts.reduce((acc, host) => acc + host.resources.length, 0);
       const checkedLength = getTotalDownloadableResourcesForPostCB(parsedHosts);
       btnDownloadPost.innerHTML = `🡳 Download (${checkedLength}/${totalResources})`;
 
-      // Create download status / progress elements.
       const { el: statusText } = ui.labels.status.createStatusLabel();
       const filePBar = ui.pBars.createFileProgressBar();
       const totalPBar = ui.pBars.createTotalProgressBar();
@@ -8601,7 +8022,6 @@ const selectedPosts = [];
           });
       });
 
-      // TODO: Extract to ui.js
       const color = ui.getTooltipBackgroundColor();
 
       let html = ui.forms.createCheckbox('config-toggle-all-posts', settings.ui.checkboxes.toggleAllCheckboxLabel, false);

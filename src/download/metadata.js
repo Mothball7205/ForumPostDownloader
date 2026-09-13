@@ -1,5 +1,4 @@
-// Per-download metadata (size/name/status) with a per-instance cache. The cache
-// is fresh per download batch so re-resolved URLs always get fresh HEADs.
+// Cache metadata per batch so re-resolved URLs receive fresh HEAD requests.
 const gmDownloadHead = url =>
   new Promise(resolve => {
     try {
@@ -88,7 +87,7 @@ const createDownloadMetadataReader = () => {
           } catch (e) {
             hintedName = '';
           }
-          if (hintedName) meta.filename = String(hintedName);
+          if (hintedName) meta.filename = hintedName;
         }
       } catch (e) {}
 

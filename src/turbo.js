@@ -20,12 +20,12 @@ const xfpdGmGetText = (getUrl, headers, timeoutMs) =>
         responseType: 'text',
         anonymous: false,
         timeout: Number(timeoutMs) || 0,
-        onload: r => resolve({ ok: true, status: r.status || 0, text: String(r.responseText || r.response || '') }),
-        onerror: () => resolve({ ok: false, status: 0, text: '' }),
-        ontimeout: () => resolve({ ok: false, status: 0, text: '' }),
+        onload: response => resolve({ status: response.status || 0, text: String(response.responseText || response.response || '') }),
+        onerror: () => resolve({ status: 0, text: '' }),
+        ontimeout: () => resolve({ status: 0, text: '' }),
       });
     } catch (e) {
-      resolve({ ok: false, status: 0, text: '' });
+      resolve({ status: 0, text: '' });
     }
   });
 
@@ -46,19 +46,15 @@ const xfpdTurboFetchSignJsonWithTimeout = async (turboId, refererUrl) => {
 
   for (let attempt = 0; attempt <= XFPD_TURBO_SIGN_RETRIES; attempt++) {
     for (const signUrl of signUrls) {
-      const r = await xfpdGmGetText(signUrl, headers, XFPD_TURBO_SIGN_TIMEOUT_MS);
-      if (!r || !r.ok || r.status !== 200 || !r.text) continue;
+      const response = await xfpdGmGetText(signUrl, headers, XFPD_TURBO_SIGN_TIMEOUT_MS);
+      if (response.status !== 200 || !response.text) continue;
 
-      let j = null;
       try {
-        j = JSON.parse(r.text);
-      } catch (e) {
-        j = null;
+        const data = JSON.parse(response.text);
+        if (data?.url && (data.success === undefined || data.success)) return data;
+      } catch {
+        // Invalid JSON can be a temporary gate; try the next endpoint.
       }
-      if (!j || !j.url) continue;
-
-      const ok = j.success === undefined ? true : !!j.success;
-      if (ok) return j;
     }
     if (attempt < XFPD_TURBO_SIGN_RETRIES) {
       await xfpdSleepMs(xfpdJitterMs(XFPD_TURBO_SIGN_JITTER_MIN_MS, XFPD_TURBO_SIGN_JITTER_MAX_MS));
@@ -68,14 +64,14 @@ const xfpdTurboFetchSignJsonWithTimeout = async (turboId, refererUrl) => {
 };
 
 const xfpdTurboSignUrlWithTimeout = async (turboId, refererUrl, nameHint) => {
-  const j = await xfpdTurboFetchSignJsonWithTimeout(turboId, refererUrl);
-  if (!j || !j.url) return null;
+  const data = await xfpdTurboFetchSignJsonWithTimeout(turboId, refererUrl);
+  if (!data) return null;
 
-  let signed = j.url;
-  const originalName = j.original_filename || nameHint;
+  let signed = data.url;
+  const originalName = data.original_filename || nameHint;
 
   // Preserve filename for Turbo CDN downloads (used later for saveAs)
-  if (signed && originalName && !/[?&]fn=/.test(String(signed))) {
+  if (originalName && !/[?&]fn=/.test(String(signed))) {
     const enc = encodeURIComponent(String(originalName)).replace(/%20/g, '+');
     signed += (signed.includes('?') ? '&' : '?') + 'fn=' + enc;
   }

@@ -1,6 +1,4 @@
-// DIRECT download pipeline (GM_download plus the Firefox Imagebam blob path).
-// Everything that can settle the attempt settles exactly once via actions.settle;
-// warm-up and preflight paths schedule pass 2 without settling.
+// DIRECT callbacks settle once; warm-up retries leave settlement to the next pass.
 const downloadResourceDirect = async (run, batch, attempt, metaHint, actions) => {
   const { postId, postNumber, postSettings, statusUI, threadTitle, isFirefox, names } = run;
   const { url, host, original, folderName, pass, isGoFile, isPixeldrain, isTurbo, isFilester, reflink, ellipsedUrl, resource } = attempt;
@@ -51,8 +49,7 @@ const downloadResourceDirect = async (run, batch, attempt, metaHint, actions) =>
     let directUrl = String(url);
     let filesterDirectPreflightDone = false;
 
-    // Filester DIRECT: retry a few times on transient HTTP errors (429/400/etc) and rotate cache hosts (cache6 <-> cache1 ...)
-    // before starting GM_download. Keeps pauses short (<=~2s).
+    // Preflight with bounded retries; rotate only legacy cache-host tokens.
     if (isFilester) {
       const sel = await selectFilesterDirectUrl(url, resource, { postId, postNumber });
       directUrl = sel.directUrl;
@@ -103,8 +100,7 @@ const downloadResourceDirect = async (run, batch, attempt, metaHint, actions) =>
       },
     };
     if (imagebamHeaders && isFirefox) {
-      // Imagebam CDN often blocks hotlinking without a Referer. In Firefox, GM_download headers
-      // are unreliable, so fetch as a blob with GM_xmlhttpRequest (with Referer) then save.
+      // Firefox GM_download may drop Imagebam's required Referer; fetch a blob first.
       try {
         GM_xmlhttpRequest({
           method: 'GET',
@@ -160,8 +156,7 @@ const downloadResourceDirect = async (run, batch, attempt, metaHint, actions) =>
     } else {
       if (imagebamHeaders) dlOpts.headers = { ...(dlOpts.headers || {}), ...imagebamHeaders };
 
-      // Filester (Chrome): preflight a 1-byte range request to capture the final URL.
-      // This helps when the downloads API drops cookies or when Filester redirects to a signed URL.
+      // Chrome may drop cookies: a one-byte preflight captures the signed redirect URL.
       if (isFilester && !isFirefox && !filesterDirectPreflightDone) {
         try {
           const ref = String(filesterRefByUrl.get(String(url)) || (resource && resource.original) || 'https://filester.me/');

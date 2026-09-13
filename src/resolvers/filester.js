@@ -30,14 +30,12 @@ resolvers.push([
             s = String(s || '').trim();
             if (!s) return '';
 
-            // Strip common suffixes.
             s = s.replace(/\s*\|\s*filester\.(me|sh|si|gg)\s*$/i, '').trim();
             s = s.replace(/\s*-\s*filester\.(me|sh|si|gg)\s*$/i, '').trim();
 
             // Replace remaining pipes with a Windows-safe separator.
             if (s.includes('|')) s = s.replace(/\s*\|\s*/g, ' - ').trim();
 
-            // Final cleanup
             s = s.replace(/\s+/g, ' ').trim();
 
             return s;

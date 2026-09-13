@@ -24,17 +24,10 @@ resolvers.push([
       return await http.base(method, url, {}, headers, data, responseType);
     };
 
-    // GoFile no longer uses the static appdata.wt from config.js for /contents.
-    // The website now derives a per-request X-Website-Token from the account token
-    // via generateWT() in https://gofile.io/js/wt.obf.js, i.e.:
-    //   WT = sha256(navigator.userAgent + "::" + navigator.language + "::" + token + "::<time>::<salt>")
-    // <time> is NOT a static value -- it's Math.floor(Date.now() / 1000 / 14400) (a
-    // 4-hour bucket), recomputed live inside generateWT() itself. <salt> is the one
-    // actual fixed constant, which can still change whenever GoFile updates the file.
-    // We trust GoFile's script to compute this token, as its website does. Function
-    // keeps the declaration local but is not a sandbox. Only fetch website scripts
-    // from GoFile itself, and cache source rather than a time-dependent token.
-    // WT must use the same UA/language as the request; X-BL echoes the language.
+    // GoFile's generateWT() uses the account token, UA/language, a live 4-hour
+    // bucket and a rotating salt. Cache its source, never the time-dependent token.
+    // Function is not a sandbox: load only GoFile's own script.
+    // Requests must use the same UA/language; X-BL echoes the language.
     let cachedGenerateWT = null;
 
     const getGenerateWT = async (force = false) => {
@@ -90,8 +83,7 @@ resolvers.push([
 
       const token = json.data.token;
 
-      // Sync/activate the fresh guest token server-side. The website does this via
-      // GET /accounts/website before it will resolve /contents for that token.
+      // Activate the guest token before requesting /contents.
       try {
         await gmReq(
           'GET',
@@ -112,8 +104,7 @@ resolvers.push([
     };
 
     const getAccountToken = async (force = false) => {
-      // If the user provided a personal Bearer token, always use it.
-      // (This is optional; leaving it empty keeps the anonymous account-token flow.)
+      // A personal Bearer token takes precedence over guest credentials.
       let token = null;
       try {
         const override = settings?.hosts?.goFile?.bearerOverride;

@@ -2,18 +2,8 @@
 const gofileNameById = new Map();
 const gofileNameByUrl = new Map();
 
-// GoFile: the site itself authenticates CDN downloads (store*/cache*.gofile.io) via an
-// "accountToken" cookie, set client-side in account.js as:
-//   document.cookie = "accountToken=" + activeAccount.token + ";path=/;domain=gofile.io;SameSite=Lax;Secure;"
-// Our GM_xmlhttpRequest download calls send cookies (anonymous: false), so mirroring that
-// cookie with OUR already-resolved guest token keeps resolution and download on the same
-// account. (The old warm-up-tab-only approach loaded a bare gofile.io tab whose own JS has
-// no knowledge of our token -- it creates and cookies a brand-new, unrelated guest account,
-// which only works by chance.) Cheap local browser API, safe to call before every request.
-//
-// Whatever accountToken cookie already exists (e.g. the user's own logged-in GoFile session)
-// gets overwritten by this. Capture it once per run so it can be restored via
-// gofileRestoreCookie() once no post is still processing (see setProcessing() below).
+// GoFile CDN requests require the accountToken cookie used during resolution.
+// Capture the user's cookie before replacing it; restore it after the last active post.
 let gofileCookieCaptured = false;
 let gofileOriginalCookieValue = null; // null = no cookie existed originally
 
@@ -72,8 +62,7 @@ const gofileSyncCookie = token =>
     })();
   });
 
-// Restore whatever accountToken cookie existed before we started overwriting it (or remove
-// ours if none existed). Called once no post is still processing -- see setProcessing() below.
+// Restore the original accountToken, or remove ours if none existed.
 const gofileRestoreCookie = () =>
   new Promise(resolve => {
     try {
@@ -194,8 +183,7 @@ function isFilesterUrl(url) {
   );
 }
 
-// Shared by single links and album items, which obtain their short-lived token
-// only when downloading. The retired v1 API returns dead links even on HTTP 200.
+// Resolve short-lived v2 tokens at download time for both single files and album items.
 async function filesterResolveV2(http, apiBase, slug, progressCB) {
   const base = String(apiBase || 'https://filester.me').replace(/\/+$/, '');
   const value = String(slug || '').trim();

@@ -115,10 +115,8 @@ const classifyDownloadAttempt = (resource, pass) => {
   };
 };
 
-// Terminal accounting: increments run.completed and batch.completed exactly once.
-// Optional UI/log fields reproduce each current branch, including bare-count
-// branches that repaint nothing. resetBatchOnFull mirrors the stall-path quirk
-// where the batch counter is zeroed once it reaches the batch length.
+// Callers own exactly-once settlement; UI/log updates are optional.
+// Stall paths reset the batch counter when it reaches the batch length.
 const settleDownloadAttempt = (run, batch, attempt, outcome = {}) => {
   const { statusColor, updateStatus, updateTotalProgress, log: logMsg, guardCompleted, resetBatchOnFull } = outcome;
 
@@ -206,9 +204,7 @@ const runDownloadTransfers = async run => {
       let url = attempt.url;
       const zippedForThis = !!(postSettings.zipped && !(resource && (resource.forceDirect || resource.forceUnzipped)));
 
-      // GoFile: make sure the browser's accountToken cookie matches the token that
-      // resolved this album BEFORE the first request (store links gate on this too,
-      // not just DIRECT) -- see gofileSyncCookie definition for why.
+      // Both blob and DIRECT requests need the GoFile cookie used during resolution.
       if (isGoFile) {
         try {
           const gfToken = settings?.hosts?.goFile?.token;
@@ -268,7 +264,6 @@ const runDownloadTransfers = async run => {
         downloadResourceDirect(run, batchState, attempt, metaHint, actions);
       };
 
-      // Forced DIRECT (used by Filester album policy: mixed albums, unzipped mixed/video-only, etc.)
       if (resource && resource.forceDirect) {
         log.post.info(postId, `::Forced DIRECT (skip blob/ZIP)::: ${url}`, postNumber);
         setTimeout(() => startDirectDownload(), TURBO_DIRECT_DELAY_MS);
@@ -328,7 +323,7 @@ const runDownloadTransfers = async run => {
             color: '#469cf3',
           });
 
-          // Pixeldrain/GoFile: if size only becomes known mid-download and it's > ~1.6GB, switch to direct download.
+          // A late size report can exceed the blob limit; hand completion to DIRECT.
           if (
             !switchedToDirect &&
             (isGoFile || attempt.isPixeldrain || isFilester) &&
@@ -382,9 +377,7 @@ const runDownloadTransfers = async run => {
           if (switchedToDirect) return;
 
           if (abortReason === 'bunkr_maint' && bunkrMaintenanceHandled) return;
-          // GoFile: this pass was superseded by a stall-triggered warm-up retry
-          // (request.abort() above isn't always reliable once a blob response is
-          // substantially buffered) -- a newer pass now owns saving this file.
+          // Buffered responses can survive abort(); only the newest GoFile pass may save.
           if (isGoFile && (batchState.gofileActivePass.get(url) || pass) > pass) return;
 
           // GoFile: detect soft-block / HTML gate
@@ -403,7 +396,6 @@ const runDownloadTransfers = async run => {
                 return;
               }
 
-              // Retry failed -> mark as unsuccessful and continue.
               actions.settle(attempt, {
                 statusColor: '#b23b3b',
                 updateStatus: true,
@@ -436,7 +428,6 @@ const runDownloadTransfers = async run => {
                 return;
               }
 
-              // Retry failed -> mark as unsuccessful and continue.
               actions.settle(attempt, {
                 statusColor: '#b23b3b',
                 updateStatus: true,
@@ -508,8 +499,7 @@ const runDownloadTransfers = async run => {
                   }
                 }
 
-                // Filester: retry a few times on transient HTTP errors (429/400/etc) before switching to DIRECT.
-                // Keep pauses short (<=~2.5s) and try alternate cacheN hosts (cache6 <-> cache1) when possible.
+                // Retry transient errors with bounded delays and alternate legacy cache hosts.
                 if (badStatus) {
                   const st0 = Number(response.status || 0) || 0;
                   const isRetryable =
@@ -589,7 +579,6 @@ const runDownloadTransfers = async run => {
 
                     if (a0 <= max0) {
                       const tgt = nextUrl || String(url || '');
-                      // retry logging: include cache switch info (cache6<->cache1 etc.)
                       let switchInfo = '';
                       try {
                         const fromU = String(url || '');
@@ -713,7 +702,6 @@ const runDownloadTransfers = async run => {
             }
           }
 
-          // Success path (unchanged)
           actions.settle(attempt, { statusColor: '#2d9053', updateStatus: true, updateTotalProgress: true });
 
           const planned = run.names.plan({
@@ -835,7 +823,7 @@ const runDownloadTransfers = async run => {
                 }
               } catch (e) {}
 
-              // Retry once (even if we couldn't re-sign, a plain retry sometimes works).
+              // Retry even if re-signing failed; the current URL may still work.
               setTimeout(() => startDownload(resource, pass + 1), st.resign >= 3 ? TURBO_RETRY_DELAY_MS * 2 : TURBO_RETRY_DELAY_MS);
               return;
             }
@@ -858,18 +846,12 @@ const runDownloadTransfers = async run => {
             return;
           }
 
-          // Make stalls visible instead of silently counting a failed download as
-          // complete (previously only GoFile logged this; every other host -- Bunkr
-          // included -- fell through to completed++ with no indication of failure).
           log.post.error(postId, `::Stalled/Failed::: ${url}`, postNumber);
 
           if (isGoFile && pass === 1 && !batchState.gofileWarmupAttempted.has(url)) {
             batchState.gofileWarmupAttempted.add(url);
             log.post.info(postId, `::GoFile stalled -> warm-up tab (${GOFILE_WARMUP_MS}ms) then retry [1/2]::: ${url}`, postNumber);
-            // request.abort() above isn't always reliable once a blob response is
-            // substantially buffered -- mark pass 2 as authoritative so a zombie
-            // pass-1 onload (see the isGoFile guard at the top of onload) can't
-            // also save the file.
+            // abort() may leave a buffered onload; pass 2 alone owns saving the file.
             batchState.gofileActivePass.set(url, 2);
             gofileWarmupOpenTab(url);
             setTimeout(() => startDownload(resource, 2), GOFILE_WARMUP_MS);

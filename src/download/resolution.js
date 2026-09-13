@@ -1,6 +1,3 @@
-// Post resolution: hint capture, resolver invocation, and duplicate removal.
-// Pure-ish module-level functions over the shared hint maps; no GM_* access.
-
 const captureDownloadHints = parsedPost => {
   try {
     const cc = parsedPost && parsedPost.contentContainer;
@@ -180,9 +177,8 @@ const resolveDownloadResources = async ({ parsedPost, enabledHosts, resolvers, p
   return resolved;
 };
 
-// Case-insensitive basename dedupe over the url-filtered list. Keeps the same
-// sorted order and therefore the same retained occurrence as before; never
-// mutates input objects. Returns the original array when nothing was removed.
+// Keep the first case-insensitive basename in host-sorted order.
+// Preserve array identity when nothing is removed; never mutate input objects.
 const removeDuplicateDownloadResources = (resources, { postId, postNumber, statusLabel }) => {
   const unique = [];
   const seen = new Set();

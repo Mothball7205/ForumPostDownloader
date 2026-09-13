@@ -1,5 +1,4 @@
-// Filester: classification, album ZIP-vs-DIRECT policy (applied once per post,
-// not once per batch), /d/->v2 token preparation, and bounded DIRECT preflight.
+// Filester album policy, just-in-time token resolution and bounded DIRECT preflight.
 const FIL_IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif', '.tif', '.tiff', '.jxl', '.heic', '.heif']);
 const FIL_VID_EXTS = new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.3gp']);
 
@@ -58,15 +57,10 @@ const classifyFilesterDownload = (url, filenameHint = '') => {
 const isFilesterAlbumOriginal = s =>
   /(?:^|\/\/)(?:www\.)?filester\.(me|sh|si|gg)\/f\//i.test(String(s || '')) || /filester\.(me|sh|si|gg)\/f\//i.test(String(s || ''));
 
-// Pure decision planner: given per-item kind ('image'|'video'|'other') and size
-// (0 = unknown), decide which items must leave the ZIP. Returns the ascending
-// indexes to force DIRECT plus the size totals used for logging.
+// Unknown sizes (0) cannot qualify an album for ZIP; return indexes requiring DIRECT.
 const planFilesterAlbum = (items, zipped, maxBytes) => {
   let hasImage = false;
   let hasNonImage = false;
-  let imgCount = 0;
-  let vidCount = 0;
-  let otherCount = 0;
   let totalSize = 0;
   let unknownSize = 0;
 
@@ -74,13 +68,8 @@ const planFilesterAlbum = (items, zipped, maxBytes) => {
     const kind = it.kind || 'other';
     if (kind === 'image') {
       hasImage = true;
-      imgCount++;
-    } else if (kind === 'video') {
-      hasNonImage = true;
-      vidCount++;
     } else {
       hasNonImage = true;
-      otherCount++;
     }
 
     const sz0 = Number(it.size) || 0;
@@ -117,9 +106,7 @@ const planFilesterAlbum = (items, zipped, maxBytes) => {
   return { forceDirectIndexes, totalSize, unknownSize };
 };
 
-// ONE pass over the resolved resources (defect fix: the old code ran this inside
-// the per-batch loop, re-probing and re-deciding for every batch). Groups by the
-// original /f/ album URL; bounded unknown-size HEAD probes (<=10 items / <=25 total).
+// Decide once per post, grouped by original album URL, before transfer batching.
 const applyFilesterAlbumPolicy = async (resources, { zipped, readMetadata, postId, postNumber }) => {
   try {
     const albumItems = resources.filter(r => r && r.url && isFilesterAlbumOriginal(r.original));
@@ -142,8 +129,7 @@ const applyFilesterAlbumPolicy = async (resources, { zipped, readMetadata, postI
         if (!(sizes[i] > 0)) unknownItems.push({ it: items[i], index: i });
       }
 
-      // Best-effort: only attempt HEAD for missing sizes on small albums.
-      // (Avoids 100x HEAD calls on huge albums; in that case we default to the safer policy.)
+      // Bound HEAD probes on large albums; unknown sizes retain the safer policy.
       if (unknownItems.length && unknownItems.length <= 10 && items.length <= 25) {
         for (const u of unknownItems) {
           const meta = await readMetadata(u.it.url);

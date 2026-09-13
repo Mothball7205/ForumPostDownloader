@@ -1,3 +1,9 @@
+// Entries: ['Name:singleCategory,albumCategory', [singlePattern, optionalAlbumPattern]].
+// The album category defaults to the single category; categories are display labels.
+// Patterns match post HTML in data-url/src/href attributes or as HTTP(S) URLs with optional www.
+// Use !! for a custom pattern without those wrappers; all patterns run with igs flags.
+// DSL: ~an@ expands to a-zA-Z0-9; <no_qs> strips query strings; <keep_ts> preserves trailing slashes.
+// Options may appear anywhere in a pattern and are removed before compilation.
 const hosts = [
   ['Simpcity:Attachments', [/(\/attachments\/|\/data\/video\/)/]],
   ['Coomer:Profiles', [/coomer.st\/[~an@._-]+\/user/]],
@@ -11,7 +17,7 @@ const hosts = [
   ],
   ['Goonbox:image', [/goonbox\.cr\/img\//, /goonbox\.cr\/a\//]],
   ['kemono:direct link', [/.{2,6}\.kemono.cr\/data\//]],
-  ['Postimg:image', [/!!https?:\/\/(www.)?i\.?(postimg|pixxxels).cc\/(.{8})/]], //[/!!https?:\/\/(www.)?postimg.cc\/(.{8})/]],
+  ['Postimg:image', [/!!https?:\/\/(www.)?i\.?(postimg|pixxxels).cc\/(.{8})/]],
   [
     'Ibb:image',
     [
@@ -58,15 +64,3 @@ const hosts = [
   ['Noodlemagazine:video', [/(adult.)?noodlemagazine.com\/watch\//]],
   ['Spankbang:video', [/spankbang.com\/.*?\/video/]],
 ];
-
-/**
- * An array of url resolvers.
- *
- * @type {((RegExp[]|(function(*): *))[]|(RegExp[]|(function(*, *): Promise<{dom: *, source: *, folderName: *, resolved}>))[]|(RegExp[]|(function(*, *): Promise<string>))[]|(RegExp[]|(function(*, *): Promise<{dom: *, source: *, folderName: *, resolved}>))[]|(RegExp[]|(function(*): *))[])[]}
- */
-/* -------------------------------------------------------------------------
- * Turbo sign hardening:
- * - timeout 5000ms
- * - retry 2x with jitter delay 700–1400ms
- * This avoids rare ~50s "waiting" stalls on https://turbo.cr/api/sign
- * ------------------------------------------------------------------------- */

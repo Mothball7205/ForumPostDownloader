@@ -1,6 +1,4 @@
-// Single source of truth for per-run download naming. Direct and blob downloads
-// used to duplicate this logic; both now flow through plan(). The planner owns
-// the per-run filenames/mimeTypes capture arrays and both uniqueness sets.
+// Direct and blob downloads share per-run filename hints and uniqueness sets.
 const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFirefox }) => {
   const filenames = [];
   const mimeTypes = [];
@@ -40,7 +38,6 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
     }
   };
 
-  // Shared tail of the direct pipeline: fold the basename into a save path.
   const planDirect = ({ resource, url, meta = {} }) => {
     const isGoFile = isGoFileUrl(url);
     const isPixeldrain = isPixeldrainUrl(url);
@@ -51,7 +48,6 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
       /bunkr/i.test(String((resource && resource.original) || ''));
     const isFilester = String((resource && resource.host && resource.host.name) || '').toLowerCase() === 'filester' || isFilesterUrl(url);
 
-    // Try to reuse the existing GoFile filename hints, if available.
     let filename = filenames.find(f => f.url === url);
     if (!filename && isGoFile) {
       const mGf = String(url).match(/\/download\/(?:web|direct)\/([^\/?#]+)\//i);
@@ -213,8 +209,7 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
       if (gid) {
         filename = filenames.find(f => f && f.gofileId === gid);
 
-        // If the per-run filenames list doesn't know this URL (e.g. re-resolved host),
-        // fall back to the global GoFile hint maps populated during /d/ resolution.
+        // Resolver hints survive CDN host changes.
         if (!filename) {
           const hinted = gofileNameById.get(String(gid)) || gofileNameByUrl.get(String(url));
           if (hinted) {
@@ -276,8 +271,7 @@ const createDownloadNamePlanner = ({ postSettings, threadTitle, postNumber, isFi
         basename = basename.replace(basename_ext, '').replace(/(\.\w{3,6}-\w{8}$)|(-\w{8}$)/, '') + basename_ext;
       }
     } else {
-      // Turbo CDN signed URLs include the original filename in the fn= query param.
-      // Without this, we'd end up saving as the short id (e.g. uVOxoqFFlDGrZ.mp4).
+      // Turbo's fn= carries the original filename; the CDN path contains only an ID.
       if (url.includes('turbocdn.st')) {
         const m = url.match(/[?&]fn=([^&]+)/i);
         if (m && m[1]) {

@@ -1,6 +1,5 @@
-// Thin orchestrator: wires the per-post pipeline together. All host resolution,
-// GoFile state, and artifact work runs inside runWithPostProcessing so cookie
-// restoration and the log cleanup are guaranteed even on early failures.
+// Keep resolution, transfers and artifacts inside the shared credential lifecycle.
+// Logs are cleared even if the pipeline fails.
 const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, getSettingsCB, statusUI, callbacks = {}) => {
   const { postId, postNumber } = parsedPost;
 
@@ -10,7 +9,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
 
       const enabledHosts = enabledHostsCB(parsedHosts);
 
-      // TODO: Fix this filth.
       window.logs = window.logs.filter(l => l.postId !== postId);
 
       log.separator(postId);
@@ -82,8 +80,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
 
       const isFF = window.isFF;
 
-      // Filester album policy runs exactly once per post (after dedupe, before batching)
-      // with its own metadata reader so no per-batch re-probes happen.
+      // Apply album policy once after dedupe, before splitting resources into batches.
       if (!postSettings.skipDownload) {
         const policyReader = createDownloadMetadataReader();
         await applyFilesterAlbumPolicy(resolved, {

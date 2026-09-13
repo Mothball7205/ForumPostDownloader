@@ -3,7 +3,6 @@ resolvers.push([
   async (url, http) => {
     const { dom, source } = await http.get(url);
 
-    // Album folder naming (stable + readable): turbo_<albumId> - <title>
     const mAlbum = url.match(/\/a\/([^\/?#]+)/i);
     const albumId = mAlbum ? mAlbum[1] : null;
     const base = albumId ? `turbo_${albumId}` : 'turbo_album';
@@ -24,19 +23,16 @@ resolvers.push([
       folderName = `${safeTitle} - ${base}`;
     }
 
-    // Final sanitize (defensive)
     folderName = folderName
       .replace(/[\\/:*?"<>|]/g, invalidSub)
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Hard cap for safety
     if (folderName.length > 180) folderName = folderName.slice(0, 180).trim();
 
     // Map videoId -> original filename (from album HTML)
     const idToName = new Map();
 
-    // Collect video ids (and names) from the table rows (server-rendered HTML)
     let ids = Array.from(dom?.querySelectorAll('tr.file-row') || [])
       .map(row => {
         const a = row.querySelector('a[href^="/v/"]');
@@ -78,7 +74,7 @@ resolvers.push([
         } catch (e) {}
       }
 
-      // If we got a Turbo CDN URL and have an original name, attach fn=
+      // Preserve album filenames when the CDN path contains only an ID.
       if (signed && /turbocdn\.st/i.test(signed)) {
         const originalName = idToName.get(id);
         if (originalName && !/[?&]fn=/.test(signed)) {
@@ -87,7 +83,6 @@ resolvers.push([
         }
       }
 
-      // If sign fails, keep a workable fallback
       if (signed && id) {
         try {
           turboIdBySignedUrl.set(String(signed), String(id));

@@ -1,20 +1,10 @@
 const ui = {
-  /**
-   * @returns {string}
-   */
   getTooltipBackgroundColor: () => {
     const scheme = document.documentElement.dataset.colorScheme;
     return scheme === 'dark' ? '#2B2B2B' : '#EDF0F3';
   },
 
-  /**
-   * @param target
-   * @param content
-   * @param options
-   * @returns {*}
-   */
   tooltip: (target, content, options = {}) => {
-    // noinspection JSUnusedGlobalSymbols
     return tippy(target, {
       arrow: true,
       theme: 'transparent',
@@ -27,12 +17,6 @@ const ui = {
     });
   },
   pBars: {
-    /**
-     * @param color
-     * @param height
-     * @param width
-     * @returns {HTMLDivElement}
-     */
     base: (color, height = '3px', width = '0%') => {
       const pb = document.createElement('div');
       pb.style.height = height;
@@ -40,19 +24,11 @@ const ui = {
       pb.style.width = width;
       return pb;
     },
-    /**
-     * @param color
-     * @returns {HTMLDivElement}
-     */
     createFileProgressBar: (color = '#46658b') => {
       const pb = ui.pBars.base(color);
       pb.style.marginBottom = '1px';
       return pb;
     },
-    /**
-     * @param color
-     * @returns {HTMLDivElement}
-     */
     createTotalProgressBar: (color = '#545454') => {
       const pb = ui.pBars.base(color);
       pb.style.marginBottom = '10px';
@@ -60,11 +36,6 @@ const ui = {
     },
   },
   labels: {
-    /**
-     * @param initialText
-     * @param color
-     * @returns {{container: HTMLDivElement, el: HTMLSpanElement}}
-     */
     createBlockLabel: (initialText = null, color = '#959595') => {
       const container = document.createElement('div');
       container.style.color = color;
@@ -83,10 +54,6 @@ const ui = {
       };
     },
     status: {
-      /**
-       * @param initialText
-       * @returns {{container: HTMLDivElement, el: HTMLSpanElement}}
-       */
       createStatusLabel: (initialText = '') => {
         const label = ui.labels.createBlockLabel(initialText);
         label.el.style.marginBottom = '3px';
@@ -96,9 +63,6 @@ const ui = {
     },
   },
   buttons: {
-    /**
-     * @returns {HTMLAnchorElement}
-     */
     createPostDownloadButton: () => {
       const downloadPostBtn = document.createElement('a');
       downloadPostBtn.setAttribute('href', '#');
@@ -106,16 +70,9 @@ const ui = {
 
       return downloadPostBtn;
     },
-    /**
-     * @returns {HTMLLIElement}
-     */
     createPostDownloadButtonContainer: () => {
       return document.createElement('li');
     },
-    /**
-     * @param post
-     * @returns {{container: HTMLLIElement, btn: HTMLAnchorElement}}
-     */
     addDownloadPostButton: post => {
       const btnDownloadPostContainer = ui.buttons.createPostDownloadButtonContainer();
       const btnDownloadPost = ui.buttons.createPostDownloadButton();
@@ -129,12 +86,6 @@ const ui = {
     },
   },
   forms: {
-    /**
-     * @param id
-     * @param label
-     * @param checked
-     * @returns {string}
-     */
     createCheckbox: (id, label, checked) => {
       return `
           <div class="menu-row" style="margin-top: -5px;">
@@ -151,10 +102,6 @@ const ui = {
           </div>
           `;
     },
-    /**
-     * @param content
-     * @returns {string}
-     */
     createRow: content => {
       return `
       <div class="menu-row">
@@ -162,10 +109,6 @@ const ui = {
       </div>
       `;
     },
-    /**
-     * @param label
-     * @returns {string}
-     */
     createLabel: label => {
       return `
       <div style="font-weight: bold; margin-top:5px; margin-bottom: 8px; color: #3DB7C7;">
@@ -175,11 +118,6 @@ const ui = {
     },
     config: {
       page: {
-        /**
-         * @param backgroundColor
-         * @param innerHTML
-         * @returns {string}
-         */
         createForm: (backgroundColor, innerHTML) => {
           return `
           <form
@@ -193,12 +131,6 @@ const ui = {
         },
       },
       post: {
-        /**
-         * @param postId
-         * @param backgroundColor
-         * @param innerHTML
-         * @returns {string}
-         */
         createForm: (postId, backgroundColor, innerHTML) => {
           return `
           <form
@@ -210,13 +142,6 @@ const ui = {
           </form>
           `;
         },
-        /**
-         * @param currentValue
-         * @param postId
-         * @param backgroundColor
-         * @param placeholder
-         * @returns {string}
-         */
         createFilenameInput: (currentValue, postId, backgroundColor, placeholder) => {
           return `
           <div class="menu-row">
@@ -237,56 +162,27 @@ const ui = {
           </div>
           `;
         },
-        /**
-         * @returns {string}
-         */
         createZippedCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-zipped`, 'Zipped', checked);
         },
-        /**
-         * @returns {string}
-         */
-        /**
-         * @returns {string}
-         */
         createFlattenCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-flatten`, 'Flatten', checked);
         },
-        /**
-         * @returns {string}
-         */
         createSkipDownloadCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-skip-download`, 'Skip Download', checked);
         },
-        /**
-         * @returns {string}
-         */
         createVerifyBunkrLinksCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-verify-bunkr-links`, 'Verify Bunkr Links', checked);
         },
-        /**
-         * @returns {string}
-         */
         createGenerateLinksCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-generate-links`, 'Generate Links', checked);
         },
-        /**
-         * @returns {string}
-         */
         createGenerateLogCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-generate-log`, 'Generate Log', checked);
         },
-        /**
-         * @returns {string}
-         */
         createSkipDuplicatesCheckbox: (postId, checked) => {
           return ui.forms.createCheckbox(`settings-${postId}-skip-duplicates`, 'Skip Duplicates', checked);
         },
-        /**
-         * @param hosts
-         * @param getTotalDownloadableResourcesCB
-         * @returns {string}
-         */
         createFilterLabel: (hosts, getTotalDownloadableResourcesCB) => {
           return `
           <div style="font-weight: bold; margin-top:5px; margin-bottom: 8px; margin-left: 8px; color: #3DB7C7;">Filter <span id="filtered-count">(${getTotalDownloadableResourcesCB(
@@ -294,29 +190,13 @@ const ui = {
           )})</span></div>
           `;
         },
-        /**
-         * @param postId
-         * @returns {string}
-         */
         createToggleAllCheckbox: postId => {
           return ui.forms.createCheckbox(`settings-toggle-all-hosts-${postId}`, settings.ui.checkboxes.toggleAllCheckboxLabel, true);
         },
-        /**
-         * @param postId
-         * @param host
-         * @returns {string}
-         */
         createHostCheckbox: (postId, host) => {
           const title = `${host.name} ${host.category}`;
           return ui.forms.createCheckbox(`downloader-host-${host.id}-${postId}`, `${title} (${host.resources.length})`, host.enabled);
         },
-        /**
-         * @param postId
-         * @param filterLabel
-         * @param hostsHtml
-         * @param createToggleAllCheckbox
-         * @returns {string}
-         */
         createHostCheckboxes: (postId, filterLabel, hostsHtml, createToggleAllCheckbox) => {
           return `
           <div>
@@ -326,15 +206,6 @@ const ui = {
           </div>
           `;
         },
-        /**
-         * @param parsedPost
-         * @param parsedHosts
-         * @param defaultFilename
-         * @param settings
-         * @param onSubmitFormCB
-         * @param totalDownloadableResourcesForPostCB
-         * @param btnDownloadPost
-         */
         createPostConfigForm: (
           parsedPost,
           parsedHosts,

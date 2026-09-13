@@ -26,8 +26,7 @@ resolvers.push([
       const id = index > -1 ? segments.slice(index + 1).join('/') : segments.pop();
       let bunkrDataId = null;
 
-      // Best-effort: read the human filename from the view page (og:title / h1 / <title>).
-      // This lets us rename CDN GUID links back to the original filename.
+      // Recover the original filename before resolution replaces it with a CDN GUID.
       try {
         const strip = s =>
           String(s || '')
@@ -52,7 +51,7 @@ resolvers.push([
             const dom = viewRes?.dom;
             const viewSource = viewRes?.source || '';
 
-            // If Cloudflare interstitial is active, don't capture a bogus "Just a moment..." title as a filename hint.
+            // A Cloudflare page title is not a filename.
             if (xfpdLooksLikeCfChallenge(viewSource, dom)) continue;
 
             if (!bunkrDataId) {
@@ -164,7 +163,7 @@ resolvers.push([
     const resolved = [];
     const seen = new Set();
 
-    // Bunkr album: keep the human filename from the album grid (title / .theName) and attach it to resolved CDN URLs.
+    // Album-grid names survive resolution to CDN GUID URLs.
     const nameHintBySlug = new Map();
 
     let firstDom = null;
@@ -209,7 +208,6 @@ resolvers.push([
           const slug = m[2];
           slugs.push(slug);
 
-          // Name hint is visible on /a/ pages (e.g. <div title="...mp4"> or .theName). Use it later when we only have a CDN GUID URL.
           try {
             let hint = c?.getAttribute?.('title') || '';
             if (!hint) hint = c?.querySelector?.('.theName')?.textContent || '';
@@ -341,7 +339,7 @@ resolvers.push([
       if (!fresh.length) break;
 
       const urls = await asyncPool(CONCURRENCY, fresh, async slug => {
-        // Fetch /f/{slug} to get the numeric file ID required by the new API.
+        // The API requires the numeric file ID from /f/{slug}.
         const fileBase = String(albumBaseChosen || origin || 'https://bunkr.cr').replace(/\/$/, '');
         const filePageUrl = `${fileBase}/f/${slug}`;
         let dataId = null;

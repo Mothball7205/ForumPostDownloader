@@ -1,4 +1,3 @@
-// noinspection SpellCheckingInspection,JSUnresolvedVariable,JSUnresolvedFunction,TypeScriptUMDGlobal,JSUnusedGlobalSymbols
 // ==UserScript==
 // @name XenForoPostDownloader
 // @namespace https://github.com/SkyCloudDev
@@ -137,29 +136,20 @@
 // @grant GM_cookie
 
 // ==/UserScript==
-// --- tab handle helper (Tampermonkey can return either a Tab object or a Promise<Tab>) ---
+// Tab cleanup is best-effort; userscript managers may return a handle or a promise.
 function xfpdCloseTabHandle(tabOrPromise) {
   try {
     if (!tabOrPromise) return;
-    // Promise-like (e.g., some GM implementations return Promise<Tab>)
     if (typeof tabOrPromise.then === 'function') {
-      try {
-        tabOrPromise
-          .then(t => {
-            try {
-              if (t && typeof t.close === 'function') t.close();
-            } catch (e) {}
-          })
-          .catch(() => {});
-      } catch (e) {}
+      tabOrPromise
+        .then(tab => {
+          try {
+            if (tab && typeof tab.close === 'function') tab.close();
+          } catch {}
+        })
+        .catch(() => {});
       return;
     }
-    // Direct tab handle
-    if (typeof tabOrPromise.close === 'function') {
-      try {
-        tabOrPromise.close();
-      } catch (e) {}
-    }
+    if (typeof tabOrPromise.close === 'function') tabOrPromise.close();
   } catch (e) {}
 }
-// ---------------------------------------------------------------------------

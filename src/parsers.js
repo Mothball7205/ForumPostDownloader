@@ -1,19 +1,11 @@
 const parsers = {
   thread: {
-    /**
-     * @returns {string}
-     */
     parseTitle: () => {
       const emojisPattern =
         /[\u{1f300}-\u{1f5ff}\u{1f900}-\u{1f9ff}\u{1f600}-\u{1f64f}\u{1f680}-\u{1f6ff}\u{2600}-\u{26ff}\u{2700}-\u{27bf}\u{1f191}-\u{1f251}\u{1f004}\u{1f0cf}\u{1f170}-\u{1f171}\u{1f17e}-\u{1f17f}\u{1f18e}\u{3030}\u{2b50}\u{2b55}\u{2934}-\u{2935}\u{2b05}-\u{2b07}\u{2b1b}-\u{2b1c}\u{3297}\u{3299}\u{303d}\u{00a9}\u{00ae}\u{2122}\u{23f3}\u{24c2}\u{23e9}-\u{23ef}\u{25b6}\u{23f8}-\u{23fa}]/gu;
       let parsed = h.stripTags(['a', 'span'], h.element('.p-title-value').innerHTML).replace('/\n/g', '');
       return !settings.naming.allowEmojis ? parsed.replace(emojisPattern, settings.naming.invalidCharSubstitute).trim() : parsed.trim();
     },
-    /**
-     *
-     * @param post
-     * @returns {{pageNumber: string, post, spoilers: *, footer: HTMLElement, contentContainer: Element, textContent: (*|string|string), postId: string, postNumber: string, content: (*|string|string|string)}}
-     */
     parsePost: post => {
       const messageContent = post.parentNode.parentNode.querySelector('.message-content > .message-userContent');
       const footer = post.parentNode.parentNode.querySelector('footer');
@@ -23,16 +15,12 @@ const parsers = {
       const postId = /(?<=\/post-).*/i.exec(postIdAnchor.getAttribute('href'))[0];
       const postNumber = postIdAnchor.textContent.replace('#', '').trim();
 
-      // Remove the following from the post content:
-      // 1. Quotes.
-      // 2. CodeBlock headers
-      // 3. Spoiler button text from each spoiler
-      // 2. Icons from un-furled urls (url parser can sometimes match them).
+      // Exclude quoted posts and decorative markup that could produce spurious URL matches.
       ['.contentRow-figure', '.js-unfurl-favicon', 'blockquote', '.button-text > span']
         .flatMap(i => [...messageContentClone.querySelectorAll(i)])
         .forEach(i => {
           if (i.tagName === 'BLOCKQUOTE') {
-            // Only remove blockquotes that quote the other posts.
+            // Preserve blockquotes that aren't quoting another post.
             if (i.querySelector('.bbCodeBlock-title')) {
               i.remove();
             }
@@ -41,29 +29,21 @@ const parsers = {
           }
         });
 
-      // Remove thread links.
       [...messageContentClone.querySelectorAll('.contentRow-header > a[href^="https://simpcity.su/threads"]')]
         .map(a => a.parentNode.parentNode.parentNode.parentNode)
         .forEach(i => i.remove());
 
-      // Prevent duplicate detection: Simpcity attachment links often wrap a JPGX preview image.
-      // For parsing only, remove the preview <img> inside attachment links so we don't count/download it twice.
+      // Attachment links wrap JPGX previews; exclude the previews to avoid duplicate downloads.
       try {
         messageContentClone.querySelectorAll('a[href*="/attachments/"] img').forEach(img => img.remove());
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
-      // Goonbox links wrap a medium-res CDN thumbnail — suppress it so we call the API for the original instead.
+      // Exclude Goonbox thumbnails so its API resolves the originals.
       try {
         messageContentClone.querySelectorAll('a[href*="goonbox.cr"] img').forEach(img => img.remove());
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
-      // Decode forum outbound link protection (e.g. /redirect/?to=...&m=b64) for parsing only.
-      // Some forums wrap external URLs in a redirect/proxy URL and store the real target in query params
-      // (often base64). If we don't decode it, host detection won't see the original domain.
+      // Decode forum redirect/proxy links on the clone so host detection sees the original domains.
       try {
         const __decodeB64Url = s => {
           if (!s) return null;
@@ -122,9 +102,7 @@ const parsers = {
               try {
                 const d2 = decodeURIComponent(decoded);
                 if (/^https?:\/\//i.test(d2)) decoded = d2;
-              } catch (e) {
-                /* ignore */
-              }
+              } catch (e) {}
             }
 
             if (!/^https?:\/\//i.test(decoded)) return null;
@@ -147,9 +125,8 @@ const parsers = {
 
             const newHost = host.replace(/^thumbs/i, 'images');
             let path = u.pathname || '';
-            // common thumb naming: *_t.jpg
+            // Imagebam thumbnails use _t or -t before the extension.
             path = path.replace(/_t(\.[a-z0-9]+)$/i, '$1');
-            // some variants use -t
             path = path.replace(/-t(\.[a-z0-9]+)$/i, '$1');
 
             return `${u.protocol}//${newHost}${path}`;
@@ -176,8 +153,7 @@ const parsers = {
           }
         });
 
-        // Prevent common thumbnail URLs inside decoded redirect links from being treated as direct downloads.
-        // (Keeps the UI intact for non-thumb embeds, but avoids downloading *_t.jpg / thumbs.* previews.)
+        // Exclude thumbnails inside decoded links without changing the displayed post.
         try {
           messageContentClone.querySelectorAll('a[data-xfpd-decoded="1"] img').forEach(img => {
             const u = (img.getAttribute('data-url') || img.getAttribute('src') || '').trim();
@@ -189,22 +165,15 @@ const parsers = {
               const uu = new URL(u, location.origin);
               host = (uu.hostname || '').toLowerCase();
               path = (uu.pathname || '').toLowerCase();
-            } catch (e) {
-              // ignore
-            }
+            } catch (e) {}
 
             const isThumb = host.includes('thumb') || /_t\.(?:jpe?g|png|webp|gif)$/i.test(u) || /\/thumbs?\//i.test(path);
 
             if (isThumb) img.remove();
           });
-        } catch (e) {
-          /* ignore */
-        }
-      } catch (e) {
-        /* ignore */
-      }
+        } catch (e) {}
+      } catch (e) {}
 
-      // Extract spoilers from the post content.
       const spoilers = [...messageContentClone.querySelectorAll('.bbCodeBlock--spoiler > .bbCodeBlock-content')]
         .filter(s => !s.querySelector('.bbCodeBlock--unfurl'))
         .concat([...messageContentClone.querySelectorAll('.bbCodeInlineSpoiler')].filter(s => !s.querySelector('.bbCodeBlock--unfurl')))
@@ -247,15 +216,10 @@ const parsers = {
     },
   },
   hosts: {
-    /**
-     * @param postContent
-     * @returns {(*&{id: number, enabled: boolean})[]}
-     */
     parseHosts: postContent => {
       let parsed = [];
 
       for (const host of hosts) {
-        // Require at-least the signature plus an array of matchers.
         if (host.length < 2) {
           continue;
         }
@@ -291,8 +255,7 @@ const parsers = {
           let matches = h.re.matchAll(pattern, postContent).unique();
 
           matches = matches.map(url => {
-            // Some XenForo post HTML can leak into the match (e.g. trailing </a>...</div>), which then
-            // creates "ghost" resources (and broken filenames like "div>"). Strip anything after the URL.
+            // Trim leaked HTML from URL matches to avoid ghost resources and broken filenames.
             url = String(url || '');
             url = url.replace(/&amp;/g, '&');
             url = url.split(/[\s"'<>]/)[0].trim();

@@ -229,7 +229,7 @@ function goonboxBridgeServe() {
     clearTimeout(idleTimer);
     controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.min(GOONBOX_API_TIMEOUT_MS, request.expires - Date.now()));
-    let status = 0;
+    let status;
     let body = '';
     try {
       // Use this tab's exact origin (including a www redirect); never follow API redirects

@@ -20,7 +20,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
       let completed = 0;
       const zip = new JSZip();
       let zipFileCount = 0;
-      let resolved = [];
 
       const statusLabel = statusUI.status;
       const filePB = statusUI.filePB;
@@ -50,7 +49,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
 
       captureDownloadHints(parsedPost);
 
-      resolved = await resolveDownloadResources({ parsedPost, enabledHosts, resolvers, postSettings, statusLabel });
+      let resolved = await resolveDownloadResources({ parsedPost, enabledHosts, resolvers, postSettings, statusLabel });
 
       let totalDownloadable = resolved.filter(r => r.url).length;
 

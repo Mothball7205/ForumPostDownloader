@@ -95,7 +95,7 @@ const resolveHostDownloadResource = async (resource, host, resolved, { parsedPos
   for (const [patterns, resolverCB] of resolvers) {
     if (!matchesDownloadResolver(patterns, resource)) continue;
     const passwords = parsedPost.spoilers.concat(parsedPost.spoilers.map(s => s.toLowerCase()));
-    let result = null;
+    let result;
     try {
       const progressCB = text => {
         try {

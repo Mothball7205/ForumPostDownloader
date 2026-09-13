@@ -53,7 +53,7 @@ resolvers.push([
         cachedGenerateWT = fn;
         return fn;
       } catch (e) {
-        throw new Error('Could not evaluate GoFile generateWT().');
+        throw new Error('Could not evaluate GoFile generateWT().', { cause: e });
       }
     };
 

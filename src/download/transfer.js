@@ -486,7 +486,7 @@ const runDownloadTransfers = async run => {
         const blob = response.response;
         const size = blob && typeof blob.size === 'number' ? blob.size : 0;
 
-        let hintSize = 0;
+        let hintSize;
         try {
           const s0 = String(filesterSlugByUrl.get(String(url)) || '');
           hintSize = Number(filesterSizeBySlug.get(s0) || filesterSizeByUrl.get(String(url)) || 0) || 0;

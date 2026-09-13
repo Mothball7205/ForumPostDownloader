@@ -9,7 +9,7 @@ resolvers.push([
 
     let finalURL = url.replace(/\?.*/, '');
 
-    let nextPage = null;
+    let nextPage;
 
     const posts = [];
 

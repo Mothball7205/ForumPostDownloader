@@ -1196,7 +1196,7 @@ function goonboxBridgeServe() {
     clearTimeout(idleTimer);
     controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.min(GOONBOX_API_TIMEOUT_MS, request.expires - Date.now()));
-    let status = 0;
+    let status;
     let body = '';
     try {
       // Use this tab's exact origin (including a www redirect); never follow API redirects
@@ -2163,7 +2163,7 @@ resolvers.push([
 
     let finalURL = url.replace(/\?.*/, '');
 
-    let nextPage = null;
+    let nextPage;
 
     const posts = [];
 
@@ -3105,7 +3105,7 @@ resolvers.push([
         cachedGenerateWT = fn;
         return fn;
       } catch (e) {
-        throw new Error('Could not evaluate GoFile generateWT().');
+        throw new Error('Could not evaluate GoFile generateWT().', { cause: e });
       }
     };
 
@@ -5250,7 +5250,7 @@ const resolveHostDownloadResource = async (resource, host, resolved, { parsedPos
   for (const [patterns, resolverCB] of resolvers) {
     if (!matchesDownloadResolver(patterns, resource)) continue;
     const passwords = parsedPost.spoilers.concat(parsedPost.spoilers.map(s => s.toLowerCase()));
-    let result = null;
+    let result;
     try {
       const progressCB = text => {
         try {
@@ -6736,7 +6736,7 @@ const runDownloadTransfers = async run => {
         const blob = response.response;
         const size = blob && typeof blob.size === 'number' ? blob.size : 0;
 
-        let hintSize = 0;
+        let hintSize;
         try {
           const s0 = String(filesterSlugByUrl.get(String(url)) || '');
           hintSize = Number(filesterSizeBySlug.get(s0) || filesterSizeByUrl.get(String(url)) || 0) || 0;
@@ -7280,7 +7280,6 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
       let completed = 0;
       const zip = new JSZip();
       let zipFileCount = 0;
-      let resolved = [];
 
       const statusLabel = statusUI.status;
       const filePB = statusUI.filePB;
@@ -7310,7 +7309,7 @@ const downloadPost = async (parsedPost, parsedHosts, enabledHostsCB, resolvers, 
 
       captureDownloadHints(parsedPost);
 
-      resolved = await resolveDownloadResources({ parsedPost, enabledHosts, resolvers, postSettings, statusLabel });
+      let resolved = await resolveDownloadResources({ parsedPost, enabledHosts, resolvers, postSettings, statusLabel });
 
       let totalDownloadable = resolved.filter(r => r.url).length;
 

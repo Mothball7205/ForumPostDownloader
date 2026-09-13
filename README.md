@@ -15,6 +15,8 @@ The script should automatically update from GitHub. If it doesn't simply repeat 
 
 ## Download pipeline
 
+Different selected sites resolve concurrently. Links from the same site stay sequential, including separate file and album selections, and existing per-album concurrency limits are unchanged. Progress reports each site's current work. Streaming downloads consume results as they become ready; buffered downloads retain selection order for duplicate filtering.
+
 Bunkr downloads start as file URLs become ready, while the remaining album files are still resolving. Resolution keeps its eight-file limit, an eight-item ready queue applies backpressure, and Bunkr transfers use one download slot. The status shows resolution progress alongside finished and active downloads.
 
 ZIP files are saved only after resolution and all transfers finish. Posts with duplicate filtering enabled, links-only mode, or a Filester album keep the resolve-first workflow so post-wide decisions remain unchanged.

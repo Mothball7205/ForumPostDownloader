@@ -3,7 +3,7 @@
 // @namespace https://github.com/Mothball7205/ForumPostDownloader
 // @author Mothball7205 (fork maintainer), SkyCloudDev (original author)
 // @description Downloads images and videos from posts
-// @version 4.3.0
+// @version 4.4.0
 // @updateURL https://github.com/Mothball7205/ForumPostDownloader/raw/main/dist/build.user.js
 // @downloadURL https://github.com/Mothball7205/ForumPostDownloader/raw/main/dist/build.user.js
 // @icon https://simp4.cuckcapital.cr/simpcityIcon192.png

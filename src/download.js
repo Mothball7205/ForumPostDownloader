@@ -61,6 +61,7 @@ const runStreamingPostDownloads = async (run, resolutionOptions) => {
     try {
       run.resolved = await resolveDownloadResources({
         ...resolutionOptions,
+        onError: queue.fail,
         onProgress: text => {
           resolutionProgress = text;
           run.onTransferProgress();

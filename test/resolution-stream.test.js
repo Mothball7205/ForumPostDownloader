@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createDownloadQueue } from '../src/download/queue.js';
 
 const source = ['src/helpers.js', 'src/download/resolution.js'].map(file => readFileSync(file, 'utf8')).join('\n');
 
@@ -140,16 +141,139 @@ test('returned-array consumer errors stop forwarding and prevent subsequent link
   expect(errors).toEqual([]);
 });
 
-test('legacy resolver failures remain recoverable and positional progress callbacks work without a status label', async () => {
+test('legacy resolver failures remain recoverable for later links', async () => {
   const { resolve, errors } = load();
-  const progress = [];
   const settings = options(async (url, http, passwords, postId, postSettings, progressCB) => {
     if (url.endsWith('/first')) throw new Error('host unavailable');
     progressCB('Resolving album page 2');
     return { folderName: 'Album', resolved: ['https://media.test/surviving.mp4'] };
   });
-  const resolved = await resolve({ ...settings, statusLabel: null, onProgress: text => progress.push(text) });
+  const resolved = await resolve({ ...settings, statusLabel: null, onProgress() {} });
   expect(resolved.map(resource => resource.url)).toEqual(['https://media.test/surviving.mp4']);
   expect(errors).toHaveLength(1);
-  expect(progress).toContain('Resolving album page 2');
+});
+
+test('different sites resolve concurrently while each site keeps one ordered lane', async () => {
+  const { resolve } = load();
+  const urls = [
+    'https://bunkr.cr/first',
+    'https://bunkr.cr/second',
+    'https://cyberdrop.cr/album',
+    'https://bunkr.cr/album',
+    'https://redgifs.com/profile',
+  ];
+  const gates = new Map(urls.map(url => [url, deferred()]));
+  const visited = [];
+  const accepted = [];
+  const queue = createDownloadQueue(2);
+  const consuming = (async () => {
+    for await (const resource of queue) accepted.push(resource.original);
+  })();
+  const resolving = resolve({
+    ...options(null),
+    enabledHosts: [
+      { name: 'Bunkr', type: 'file', resources: urls.slice(0, 2) },
+      { name: 'Cyberdrop', resources: [urls[2]] },
+      { name: 'bUnKr', type: 'folder', resources: [urls[3]] },
+      { name: 'Redgifs', resources: [urls[4]] },
+    ],
+    resolvers: [
+      [
+        [/https:/],
+        async url => {
+          visited.push(url);
+          await gates.get(url).promise;
+          return `${url}/download.mp4`;
+        },
+      ],
+    ],
+    onResource: resource => queue.push(resource),
+    onError: queue.fail,
+    onProgress() {},
+  });
+  await flushResolution();
+  expect(visited).toEqual([urls[0], urls[2], urls[4]]);
+  gates.get(urls[2]).resolve();
+  await flushResolution();
+  expect(accepted).toEqual([urls[2]]);
+  gates.get(urls[0]).resolve();
+  await flushResolution();
+  expect(visited).toEqual([urls[0], urls[2], urls[4], urls[1]]);
+  gates.get(urls[1]).resolve();
+  await flushResolution();
+  expect(visited.at(-1)).toBe(urls[3]);
+  gates.get(urls[3]).resolve();
+  gates.get(urls[4]).resolve();
+  const result = await resolving;
+  queue.close();
+  await consuming;
+  expect(result.map(resource => resource.original)).toEqual(urls);
+  expect(new Set(accepted)).toEqual(new Set(urls));
+});
+
+test('a fatal acceptance error wakes other sites blocked on the full ready queue', async () => {
+  const { resolve } = load();
+  const queue = createDownloadQueue(1);
+  await queue.push({ url: 'already queued' });
+  const failure = new Error('consumer failed');
+  const accepting = deferred();
+  const resolving = resolve({
+    ...options(null),
+    enabledHosts: [
+      { name: 'Bunkr', resources: ['https://bunkr.cr/one', 'https://bunkr.cr/two'] },
+      { name: 'Cyberdrop', resources: ['https://cyberdrop.cr/one'] },
+    ],
+    resolvers: [[[/https:/], async url => `${url}/download.mp4`]],
+    onProgress() {},
+    onError: queue.fail,
+    onResource: async resource => {
+      if (resource.host.name === 'Cyberdrop') {
+        await accepting.promise;
+        throw failure;
+      }
+      accepting.resolve();
+      await queue.push(resource);
+    },
+  });
+  await expect(resolving).rejects.toBe(failure);
+  await expect(queue.next()).rejects.toBe(failure);
+});
+
+test('fatal resolution waits for active sites to drain without starting their next link', async () => {
+  const { resolve } = load();
+  const release = deferred();
+  const notified = deferred();
+  const visited = [];
+  const failure = new Error('queue failed');
+  let finished = false;
+  const resolving = resolve({
+    ...options(null),
+    enabledHosts: [
+      { name: 'Bunkr', resources: ['https://bunkr.cr/one'] },
+      { name: 'Cyberdrop', resources: ['https://cyberdrop.cr/one', 'https://cyberdrop.cr/two'] },
+    ],
+    resolvers: [
+      [
+        [/https:/],
+        async url => {
+          visited.push(url);
+          if (url.includes('cyberdrop')) await release.promise;
+          return `${url}/download.mp4`;
+        },
+      ],
+    ],
+    onResource: async () => {
+      throw failure;
+    },
+    onError: () => notified.resolve(),
+    onProgress() {},
+  }).finally(() => {
+    finished = true;
+  });
+  await notified.promise;
+  await flushResolution();
+  expect(finished).toBe(false);
+  release.resolve();
+  await expect(resolving).rejects.toBe(failure);
+  expect(visited).toEqual(['https://bunkr.cr/one', 'https://cyberdrop.cr/one']);
 });

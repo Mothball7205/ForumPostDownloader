@@ -148,54 +148,96 @@ const resolveHostDownloadResource = async (
   }
 };
 
-const resolveDownloadResources = async ({ parsedPost, enabledHosts, resolvers, postSettings, statusLabel, onResource, onProgress }) => {
+const resolveDownloadResources = async ({
+  parsedPost,
+  enabledHosts,
+  resolvers,
+  postSettings,
+  statusLabel,
+  onResource,
+  onProgress,
+  onError,
+}) => {
   const { postId, postNumber } = parsedPost;
-  const resolved = [];
-  let resolvingIndex = 0;
+  // Keep separate result buckets in selection order, even when sites finish out of order.
+  const entries = enabledHosts.map(host => ({ host, resolved: [] }));
+  const sites = new Map();
+  for (const entry of entries) {
+    if (!entry.host.resources.length) continue;
+    const name = String(entry.host.name).trim().toLowerCase();
+    if (!sites.has(name)) sites.set(name, []);
+    sites.get(name).push(entry);
+  }
+  const progress = new Map();
+  let failed = false;
+  let failure;
+  const fail = error => {
+    if (failed) return;
+    failed = true;
+    failure = error;
+    // Wake producers blocked on the shared ready queue before awaiting other sites.
+    onError?.(error);
+  };
+  const accept =
+    onResource &&
+    (async resource => {
+      if (failed) throw failure;
+      try {
+        await onResource(resource);
+      } catch (error) {
+        fail(error);
+        throw error;
+      }
+    });
+  const report = (site, text) => {
+    if (failed) return;
+    progress.set(site, text);
+    updateDownloadResolutionProgress(
+      statusLabel,
+      Array.from(progress, ([name, message]) => `${name}: ${message}`).join(' | '),
+      '#469cf3',
+      onProgress,
+    );
+  };
+  const resolveSite = async siteEntries => {
+    const name = siteEntries[0].host.name;
+    const total = siteEntries.reduce((count, entry) => count + entry.host.resources.length, 0);
+    let index = 0;
+    try {
+      // A site's files/albums share one lane; only different sites overlap.
+      for (const { host, resolved } of siteEntries) {
+        for (const resource of host.resources) {
+          if (failed) return;
+          report(name, `Resolving link ${++index} / ${total} 🢒 ${h.limit(resource, 80)}`);
+          await resolveHostDownloadResource(resource, host, resolved, {
+            parsedPost,
+            resolvers,
+            postSettings,
+            statusLabel,
+            onResource: accept,
+            onProgress: text => report(name, text),
+          });
+        }
+      }
+      report(name, `Resolved ${siteEntries.reduce((count, entry) => count + entry.resolved.length, 0)} files`);
+    } catch (error) {
+      fail(error);
+    }
+  };
 
   log.post.info(postId, '::Url resolution started::', postNumber);
-
-  const totalResourcesToResolve = enabledHosts.reduce((acc, host) => acc + host.resources.length, 0);
-
-  for (const host of enabledHosts.filter(host => host.resources.length)) {
-    const resources = host.resources;
-
-    for (const resource of resources) {
-      resolvingIndex++;
-      updateDownloadResolutionProgress(
-        statusLabel,
-        `Resolving: ${resolvingIndex} / ${totalResourcesToResolve} 🢒 ${h.limit(resource, 80)}`,
-        '#469cf3',
-        onProgress,
-      );
-
-      await resolveHostDownloadResource(resource, host, resolved, {
-        parsedPost,
-        resolvers,
-        postSettings,
-        statusLabel,
-        onResource,
-        onProgress,
-      });
-    }
-  }
-
-  if (resolved.length) {
-    log.separator(postId);
-  }
-
+  await Promise.allSettled(Array.from(sites.values(), resolveSite));
+  if (failed) throw failure;
+  const resolved = entries.flatMap(entry => entry.resolved);
+  if (resolved.length) log.separator(postId);
   log.post.info(postId, '::Url resolution completed::', postNumber);
-
-  const totalDownloadable = resolved.filter(r => r.url).length;
-  const totalResources = enabledHosts.reduce((acc, h) => h.resources.length + acc, 0);
-
+  const totalResources = enabledHosts.reduce((count, host) => count + host.resources.length, 0);
   updateDownloadResolutionProgress(
     statusLabel,
-    `Resolved: ${resolved.length} / ${totalDownloadable} 🢒 ${totalResources} Total Links`,
+    `Resolved: ${resolved.length} / ${resolved.length} 🢒 ${totalResources} Total Links`,
     '#47ba24',
     onProgress,
   );
-
   return resolved;
 };
 

@@ -1,3 +1,15 @@
+function cyberdropFirstInfoField(info, fields, fileBeforeData = false) {
+  if (!info) return null;
+  const containers = fileBeforeData ? [info, info.file, info.data, info.data?.file] : [info, info.data, info.file, info.data?.file];
+  for (const container of containers) {
+    if (!container) continue;
+    for (const field of fields) {
+      if (container[field]) return container[field];
+    }
+  }
+  return null;
+}
+
 resolvers.push([
   [/fs-\d+\.cyberdrop\.[a-z]{2,}\/|cyberdrop\.[a-z]{2,}\/a\//],
   async (url, http, passwords, postId, postSettings, progressCB) => {
@@ -87,30 +99,33 @@ resolvers.push([
 
       const folderName = pickTitle(html);
 
-      // Capture per-file names from the album page so downloads keep extensions.
-      try {
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        const nodes = doc.querySelectorAll('a#file[href^="/f/"], a[id="file"][href^="/f/"], a[href^="/f/"][title][href^="/f/"]');
-        nodes.forEach(a => {
-          const href = a.getAttribute('href') || '';
-          const m = href.match(/\/f\/([A-Za-z0-9]+)/);
-          if (!m) return;
-          const slug = m[1];
-          const nm = (a.getAttribute('title') || a.textContent || '').trim();
-          if (nm) cyberdropNameBySlug.set(slug, nm);
-        });
-      } catch (e) {}
+      const captureAlbumNames = src => {
+        // Capture per-file names from the album page so downloads keep extensions.
+        try {
+          const doc = new DOMParser().parseFromString(src, 'text/html');
+          const nodes = doc.querySelectorAll('a#file[href^="/f/"], a[id="file"][href^="/f/"], a[href^="/f/"][title][href^="/f/"]');
+          nodes.forEach(a => {
+            const href = a.getAttribute('href') || '';
+            const m = href.match(/\/f\/([A-Za-z0-9]+)/);
+            if (!m) return;
+            const slug = m[1];
+            const nm = (a.getAttribute('title') || a.textContent || '').trim();
+            if (nm) cyberdropNameBySlug.set(slug, nm);
+          });
+        } catch (e) {}
 
-      // Regex fallback (in case DOMParser is blocked).
-      try {
-        const rxName = /href=["']\/f\/([A-Za-z0-9]+)["'][^>]*\btitle=["']([^"']+)["']/gi;
-        let m;
-        while ((m = rxName.exec(html)) !== null) {
-          const slug = m[1];
-          const nm = decodeHtml(m[2]).trim();
-          if (nm) cyberdropNameBySlug.set(slug, nm);
-        }
-      } catch (e) {}
+        // Regex fallback (in case DOMParser is blocked).
+        try {
+          const rxName = /href=["']\/f\/([A-Za-z0-9]+)["'][^>]*\btitle=["']([^"']+)["']/gi;
+          let m;
+          while ((m = rxName.exec(src)) !== null) {
+            const slug = m[1];
+            const nm = decodeHtml(m[2]).trim();
+            if (nm) cyberdropNameBySlug.set(slug, nm);
+          }
+        } catch (e) {}
+      };
+      captureAlbumNames(html);
 
       const host = (() => {
         try {
@@ -126,15 +141,9 @@ resolvers.push([
       const apiBaseList = [...new Set(apiBases)];
 
       const resolved = [];
-      for (let i = 0; i < slugs.length; i++) {
-        const slug = slugs[i];
-        progressCB?.(`Cyberdrop: resolving ${i + 1}/${slugs.length}`);
-
-        let j = null;
-
+      const requestAlbumFile = async slug => {
         for (const base of apiBaseList) {
           const apiUrl = `${base}/api/file/auth/${slug}`;
-
           const r = await http.get(
             apiUrl,
             {},
@@ -145,31 +154,36 @@ resolvers.push([
             },
             'text',
           );
-
           if (!r || !r.source) continue;
 
+          let parsed = null;
           try {
-            j = JSON.parse(r.source);
-          } catch (e) {
-            j = null;
-          }
-          if (j) break;
+            parsed = JSON.parse(r.source);
+          } catch (e) {}
+          if (parsed) return parsed;
         }
+        return null;
+      };
 
-        if (!j) continue;
-
+      const pickAlbumDirect = parsed => {
+        if (!parsed) return null;
         let direct = null;
-        if (typeof j.url === 'string') direct = j.url;
-        else if (j.data && typeof j.data.url === 'string') direct = j.data.url;
-        else if (typeof j.file === 'string') direct = j.file;
-        else if (j.data && typeof j.data.file === 'string') direct = j.data.file;
+        if (typeof parsed.url === 'string') direct = parsed.url;
+        else if (parsed.data && typeof parsed.data.url === 'string') direct = parsed.data.url;
+        else if (typeof parsed.file === 'string') direct = parsed.file;
+        else if (parsed.data && typeof parsed.data.file === 'string') direct = parsed.data.file;
 
-        if (typeof direct !== 'string' || !direct.trim()) continue;
+        if (typeof direct !== 'string' || !direct.trim()) return null;
         direct = direct.trim();
         if (direct.startsWith('//')) direct = 'https:' + direct;
+        return /^https?:\/\//i.test(direct) ? direct : null;
+      };
 
-        if (!/^https?:\/\//i.test(direct)) continue;
-        resolved.push(direct);
+      for (let i = 0; i < slugs.length; i++) {
+        const slug = slugs[i];
+        progressCB?.(`Cyberdrop: resolving ${i + 1}/${slugs.length}`);
+        const direct = pickAlbumDirect(await requestAlbumFile(slug));
+        if (direct) resolved.push(direct);
       }
 
       if (!resolved.length) return url;
@@ -261,236 +275,218 @@ resolvers.push([
         return r;
       };
 
-      const fetchInfo = async () => {
-        const parseInfoText = (txt, baseHint) => {
-          const out = { direct: null, name: null, token: null, base: null, auth: null };
-          const s = String(txt || '');
-          const apiBase = typeof baseHint === 'string' && /^https?:\/\//i.test(baseHint) ? baseHint.replace(/\/$/, '') : apiBaseDefault;
-          if (!s) return out;
+      const captureTokenUrl = (s, out, apiBase) => {
+        // Prefer absolute token URLs, including JSON-escaped forms.
+        const rePlain = new RegExp(`https?:\/\/[^"'\\s]+\/api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
+        let m = s.match(rePlain);
+        if (m && m[0]) out.direct = m[0];
 
-          // Prefer absolute token URLs, including JSON-escaped forms.
-          const rePlain = new RegExp(`https?:\/\/[^"'\\s]+\/api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
-          let m = s.match(rePlain);
-          if (m && m[0]) out.direct = m[0];
+        if (!out.direct) {
+          const reEsc = new RegExp(`https?:\\/\\/[^"\\s]+\\/api\\/file\\/d\\/${slug}\\?[^"\\s]*token=[^"\\s]+`, 'i');
+          m = s.match(reEsc);
+          if (m && m[0]) out.direct = m[0].replace(/\\\//g, '/');
+        }
 
-          if (!out.direct) {
-            const reEsc = new RegExp(`https?:\\/\\/[^"\\s]+\\/api\\/file\\/d\\/${slug}\\?[^"\\s]*token=[^"\\s]+`, 'i');
-            m = s.match(reEsc);
-            if (m && m[0]) out.direct = m[0].replace(/\\\//g, '/');
-          }
+        // Relative token URLs belong to the API origin that returned them.
+        if (!out.direct) {
+          const reRel1 = new RegExp(`\/api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
+          m = s.match(reRel1);
+          if (m && m[0]) out.direct = `${apiBase}${m[0]}`;
+        }
 
-          // Relative token URLs belong to the API origin that returned them.
-          if (!out.direct) {
-            const reRel1 = new RegExp(`\/api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
-            m = s.match(reRel1);
-            if (m && m[0]) out.direct = `${apiBase}${m[0]}`;
-          }
+        if (!out.direct) {
+          const reRel2 = new RegExp(`api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
+          m = s.match(reRel2);
+          if (m && m[0]) out.direct = `${apiBase}/${m[0].replace(/^\//, '')}`;
+        }
+      };
+      const captureJsonInfo = (s, out, apiBase) => {
+        // Some responses separate filename, token, host and auth URL.
+        try {
+          const j = JSON.parse(s);
+          const seen = new Set();
 
-          if (!out.direct) {
-            const reRel2 = new RegExp(`api\/file\/d\/${slug}\?[^"'\\s]*token=[^"'\\s]+`, 'i');
-            m = s.match(reRel2);
-            if (m && m[0]) out.direct = `${apiBase}/${m[0].replace(/^\//, '')}`;
-          }
+          const looksLikeName = v => {
+            if (!v || typeof v !== 'string') return false;
+            if (v.length > 260) return false;
+            if (/^https?:\/\//i.test(v)) return false;
+            const base = v.split(/[\\/]/).pop();
+            return /^[^<>:"|?*\x00-\x1F]+\.[a-z0-9]{2,8}$/i.test(base);
+          };
 
-          // Some responses separate filename, token, host and auth URL.
-          try {
-            const j = JSON.parse(s);
-            const seen = new Set();
+          const looksLikeJwt = v => {
+            if (!v || typeof v !== 'string') return false;
+            return /^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v);
+          };
 
-            const looksLikeName = v => {
-              if (!v || typeof v !== 'string') return false;
-              if (v.length > 260) return false;
-              if (/^https?:\/\//i.test(v)) return false;
-              const base = v.split(/[\\/]/).pop();
-              return /^[^<>:"|?*\x00-\x1F]+\.[a-z0-9]{2,8}$/i.test(base);
-            };
+          const isTokenUrl = v => {
+            if (!v || typeof v !== 'string') return false;
+            return v.includes(`/api/file/d/${slug}`) && /token=/i.test(v);
+          };
 
-            const looksLikeJwt = v => {
-              if (!v || typeof v !== 'string') return false;
-              return /^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v);
-            };
+          const looksLikeBase = v => {
+            if (!v || typeof v !== 'string') return false;
+            // Accept origins or hostnames that look like Cyberdrop CDN
+            if (/gigachad-cdn\.ru/i.test(v) || /cyberdrop\./i.test(v)) return true;
+            if (/^k\d+-cd\./i.test(v)) return true;
+            return false;
+          };
 
-            const isTokenUrl = v => {
-              if (!v || typeof v !== 'string') return false;
-              return v.includes(`/api/file/d/${slug}`) && /token=/i.test(v);
-            };
-
-            const looksLikeBase = v => {
-              if (!v || typeof v !== 'string') return false;
-              // Accept origins or hostnames that look like Cyberdrop CDN
-              if (/gigachad-cdn\.ru/i.test(v) || /cyberdrop\./i.test(v)) return true;
-              if (/^k\d+-cd\./i.test(v)) return true;
-              return false;
-            };
-
-            const normalizeBase = v => {
-              try {
-                const t = String(v || '').trim();
-                if (!t) return null;
-                if (/^https?:\/\//i.test(t)) {
-                  const uu = new URL(t);
-                  return `${uu.protocol}//${uu.hostname}`;
-                }
-                if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(t)) return `https://${t}`;
-              } catch (e) {}
-              return null;
-            };
-
-            const walk = (val, key = '') => {
-              if (val === null || val === undefined) return;
-
-              if (typeof val === 'string') {
-                const v = val;
-
-                if (isTokenUrl(v) && (!out.direct || v.length > out.direct.length)) out.direct = v;
-
-                if (!out.name) {
-                  if (looksLikeName(v) || /(file)?name/i.test(String(key))) {
-                    const base = v.split(/[\\/]/).pop();
-                    if (looksLikeName(base)) out.name = base;
-                  }
-                }
-
-                // Tokens may be separate from the URL, under arbitrary keys.
-                if (!out.token && looksLikeJwt(v)) out.token = v;
-
-                // Some info responses require a second request to an auth URL.
-                if (!out.auth) {
-                  if (/(^|[^a-z])auth([^a-z]|$)/i.test(String(key)) && /\/api\/file\/auth\//i.test(v)) {
-                    out.auth = v;
-                  } else if (/\/api\/file\/auth\//i.test(v) && /cyberdrop/i.test(v)) {
-                    out.auth = v;
-                  }
-                }
-
-                if (!out.base && (/(cdn|host|domain|server|origin)/i.test(String(key)) || looksLikeBase(v))) {
-                  const b = normalizeBase(v);
-                  if (b) out.base = b;
-                }
-
-                return;
+          const normalizeBase = v => {
+            try {
+              const t = String(v || '').trim();
+              if (!t) return null;
+              if (/^https?:\/\//i.test(t)) {
+                const uu = new URL(t);
+                return `${uu.protocol}//${uu.hostname}`;
               }
+              if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(t)) return `https://${t}`;
+            } catch (e) {}
+            return null;
+          };
 
-              if (typeof val !== 'object') return;
-              if (seen.has(val)) return;
-              seen.add(val);
+          const captureName = (v, key) => {
+            if (out.name) return;
+            if (!looksLikeName(v) && !/(file)?name/i.test(String(key))) return;
+            const base = v.split(/[\\/]/).pop();
+            if (looksLikeName(base)) out.name = base;
+          };
 
-              if (Array.isArray(val)) {
-                for (const v of val) walk(v, key);
-              } else {
-                for (const [k, v] of Object.entries(val)) walk(v, k);
-              }
-            };
+          const captureLocation = (v, key) => {
+            // Some info responses require a second request to an auth URL.
+            const isAuth = /\/api\/file\/auth\//i.test(v) && (/(^|[^a-z])auth([^a-z]|$)/i.test(String(key)) || /cyberdrop/i.test(v));
+            if (!out.auth && isAuth) out.auth = v;
 
-            walk(j, '');
+            if (!out.base && (/(cdn|host|domain|server|origin)/i.test(String(key)) || looksLikeBase(v))) {
+              const base = normalizeBase(v);
+              if (base) out.base = base;
+            }
+          };
 
-            // Common direct URL fields
+          const captureString = (v, key) => {
+            if (isTokenUrl(v) && (!out.direct || v.length > out.direct.length)) out.direct = v;
+            captureName(v, key);
+            // Tokens may be separate from the URL, under arbitrary keys.
+            if (!out.token && looksLikeJwt(v)) out.token = v;
+            captureLocation(v, key);
+          };
+
+          const walk = (val, key = '') => {
+            if (val === null || val === undefined) return;
+            if (typeof val === 'string') {
+              captureString(val, key);
+              return;
+            }
+            if (typeof val !== 'object' || seen.has(val)) return;
+            seen.add(val);
+
+            if (Array.isArray(val)) {
+              for (const v of val) walk(v, key);
+            } else {
+              for (const [k, v] of Object.entries(val)) walk(v, k);
+            }
+          };
+
+          walk(j, '');
+
+          const captureCommonFields = () => {
+            // Preserve first-truthy field precedence, even for non-string values.
             if (!out.direct) {
-              const direct =
-                (j &&
-                  (j.url ||
-                    j.downloadUrl ||
-                    j.download_url ||
-                    (j.data && (j.data.url || j.data.downloadUrl || j.data.download_url)) ||
-                    (j.file && (j.file.url || j.file.downloadUrl || j.file.download_url)) ||
-                    (j.data && j.data.file && (j.data.file.url || j.data.file.downloadUrl || j.data.file.download_url)))) ||
-                null;
+              const direct = cyberdropFirstInfoField(j, ['url', 'downloadUrl', 'download_url']);
               if (direct && typeof direct === 'string') out.direct = direct;
             }
-
-            // Explicit auth fields can supply URLs missed by the scan.
             if (!out.auth) {
-              const a =
-                (j &&
-                  (j.auth_url ||
-                    j.authUrl ||
-                    (j.data && (j.data.auth_url || j.data.authUrl)) ||
-                    (j.file && (j.file.auth_url || j.file.authUrl)) ||
-                    (j.data && j.data.file && (j.data.file.auth_url || j.data.file.authUrl)))) ||
-                null;
-              if (a && typeof a === 'string') out.auth = a;
+              const auth = cyberdropFirstInfoField(j, ['auth_url', 'authUrl']);
+              if (auth && typeof auth === 'string') out.auth = auth;
             }
-
-            // Common filename fields
             if (!out.name) {
-              const n =
-                (j &&
-                  (j.name ||
-                    j.filename ||
-                    j.fileName ||
-                    j.originalName ||
-                    (j.file && (j.file.name || j.file.filename || j.file.fileName || j.file.originalName)) ||
-                    (j.data && (j.data.name || j.data.filename || j.data.fileName || j.data.originalName)) ||
-                    (j.data &&
-                      j.data.file &&
-                      (j.data.file.name || j.data.file.filename || j.data.file.fileName || j.data.file.originalName)))) ||
-                null;
-              if (n && typeof n === 'string' && looksLikeName(n)) out.name = n.split(/[\\/]/).pop();
+              const name = cyberdropFirstInfoField(j, ['name', 'filename', 'fileName', 'originalName'], true);
+              if (name && typeof name === 'string' && looksLikeName(name)) out.name = name.split(/[\\/]/).pop();
             }
+          };
+          captureCommonFields();
 
-            if (!out.direct && out.token) {
-              const tok = out.token.includes('%') ? out.token : encodeURIComponent(out.token);
-              const base = out.base || apiBase;
-              out.direct = `${base.replace(/\/$/, '')}/api/file/d/${slug}?token=${tok}`;
-            }
-          } catch (e) {}
-
-          if (out.direct && typeof out.direct === 'string' && out.direct.includes('\\/')) {
-            out.direct = out.direct.replace(/\\\//g, '/');
+          if (!out.direct && out.token) {
+            const tok = out.token.includes('%') ? out.token : encodeURIComponent(out.token);
+            const base = out.base || apiBase;
+            out.direct = `${base.replace(/\/$/, '')}/api/file/d/${slug}?token=${tok}`;
           }
+        } catch (e) {}
+      };
+      const normalizeInfoUrls = (out, apiBase) => {
+        if (out.direct && typeof out.direct === 'string' && out.direct.includes('\\/')) {
+          out.direct = out.direct.replace(/\\\//g, '/');
+        }
 
-          if (out.direct && typeof out.direct === 'string' && out.direct.startsWith('/')) {
-            out.direct = `${apiBase}${out.direct}`;
+        if (out.direct && typeof out.direct === 'string' && out.direct.startsWith('/')) {
+          out.direct = `${apiBase}${out.direct}`;
+        }
+
+        // Normalize escaped slashes and relative auth URLs
+        if (out.auth && typeof out.auth === 'string' && out.auth.includes('\\/')) {
+          out.auth = out.auth.replace(/\\\//g, '/');
+        }
+        if (out.auth && typeof out.auth === 'string') {
+          if (out.auth.startsWith('/')) {
+            out.auth = `${apiBase}${out.auth}`;
+          } else if (!/^https?:\/\//i.test(out.auth) && /api\/file\/auth\//i.test(out.auth)) {
+            out.auth = `${apiBase}/${out.auth.replace(/^\/+/, '')}`;
           }
+        }
+      };
+      const parseInfoText = (txt, baseHint) => {
+        const out = { direct: null, name: null, token: null, base: null, auth: null };
+        const s = String(txt || '');
+        const apiBase = typeof baseHint === 'string' && /^https?:\/\//i.test(baseHint) ? baseHint.replace(/\/$/, '') : apiBaseDefault;
+        if (!s) return out;
 
-          // Normalize escaped slashes and relative auth URLs
-          if (out.auth && typeof out.auth === 'string' && out.auth.includes('\\/')) {
-            out.auth = out.auth.replace(/\\\//g, '/');
-          }
-          if (out.auth && typeof out.auth === 'string') {
-            if (out.auth.startsWith('/')) {
-              out.auth = `${apiBase}${out.auth}`;
-            } else if (!/^https?:\/\//i.test(out.auth) && /api\/file\/auth\//i.test(out.auth)) {
-              out.auth = `${apiBase}/${out.auth.replace(/^\/+/, '')}`;
-            }
-          }
+        captureTokenUrl(s, out, apiBase);
 
-          return out;
-        };
+        captureJsonInfo(s, out, apiBase);
 
+        normalizeInfoUrls(out, apiBase);
+
+        return out;
+      };
+
+      const apiOrigin = (apiUrl, fallback) => {
+        try {
+          return new URL(apiUrl).origin;
+        } catch (e) {
+          return fallback;
+        }
+      };
+
+      const requestInfo = async (apiUrl, fallbackBase) => {
+        const { source, status } = await cyberdropFetchText(apiUrl);
+        if (status !== 200 || !source) return null;
+        const baseHint = apiOrigin(apiUrl, fallbackBase);
+        const info = parseInfoText(source, baseHint);
+        info.requestOrigin = baseHint;
+        return info;
+      };
+
+      const resolveAuthInfo = async info => {
+        if (info.direct || !info.auth || typeof info.auth !== 'string') return;
+        // info -> auth -> tokenized direct URL; auth failure still keeps the info filename.
+        try {
+          const parsedAuth = await requestInfo(info.auth, info.requestOrigin);
+          if (!parsedAuth) return;
+          if (!info.name && parsedAuth.name) info.name = parsedAuth.name;
+          if (!info.direct && parsedAuth.direct) info.direct = parsedAuth.direct;
+        } catch (e) {}
+      };
+
+      const fetchInfo = async () => {
         for (const apiUrl of apiCandidates) {
           try {
-            const { source, status } = await cyberdropFetchText(apiUrl);
-            if (status !== 200 || !source) continue;
+            const info = await requestInfo(apiUrl, apiBaseDefault);
+            if (!info) continue;
+            await resolveAuthInfo(info);
 
-            let baseHint = apiBaseDefault;
-            try {
-              baseHint = new URL(apiUrl).origin;
-            } catch (e) {}
-            const { direct, name, auth } = parseInfoText(source, baseHint);
-
-            let resolvedName = name || null;
-            let resolvedDirect = direct || null;
-
-            // info -> auth -> tokenized direct URL.
-            if (!resolvedDirect && auth && typeof auth === 'string') {
-              const authUrl = auth;
-              try {
-                const { source: authSource, status: authStatus } = await cyberdropFetchText(authUrl);
-                if (authStatus === 200 && authSource) {
-                  let authBase = baseHint;
-                  try {
-                    authBase = new URL(authUrl).origin;
-                  } catch (e) {}
-                  const parsedAuth = parseInfoText(authSource, authBase);
-                  if (!resolvedName && parsedAuth && parsedAuth.name) resolvedName = parsedAuth.name;
-                  if (!resolvedDirect && parsedAuth && parsedAuth.direct) resolvedDirect = parsedAuth.direct;
-                }
-              } catch (e) {}
-            }
-
+            const resolvedName = info.name || null;
+            const resolvedDirect = info.direct || null;
             if (resolvedName) cyberdropNameBySlug.set(String(slug), String(resolvedName));
-
             if (resolvedDirect && typeof resolvedDirect === 'string') {
               if (resolvedName) cyberdropNameByUrl.set(String(resolvedDirect), String(resolvedName));
               return resolvedDirect;

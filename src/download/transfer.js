@@ -152,11 +152,24 @@ const settleDownloadAttempt = (run, batch, attempt, outcome = {}) => {
   }
 };
 
+const turboTransferIdentity = (isTurbo, url, original) => {
+  const turboId = isTurbo ? turboIdBySignedUrl.get(String(url)) || turboExtractId(original) || turboExtractId(url) || '' : '';
+  const turboKey = isTurbo ? (turboId ? `turbo:${turboId}` : `turbo-url:${url}`) : '';
+  return { turboId, turboKey };
+};
+
+const blobTransferHeaders = (isFilester, url, resource, reflink) => {
+  const isTurboCdn = /turbocdn\.st/i.test(String(url || ''));
+  const filesterRef = isFilester
+    ? String(filesterRefByUrl.get(String(url)) || (resource && resource.original) || 'https://filester.me/')
+    : '';
+  return isTurboCdn ? { Referer: 'https://turbo.cr/' } : isFilester ? { Referer: filesterRef } : { Referer: reflink };
+};
+
 const runDownloadTransfers = async run => {
   const { postId, postNumber, postSettings, statusUI, resolved } = run;
   const statusLabel = statusUI.status;
   const filePB = statusUI.filePB;
-  const totalPB = statusUI.totalPB;
 
   if (postSettings.skipDownload) {
     log.post.info(postId, '::Skipping download::', postNumber);
@@ -231,8 +244,7 @@ const runDownloadTransfers = async run => {
         }
       }
 
-      const turboId = isTurbo ? turboIdBySignedUrl.get(String(url)) || turboExtractId(original) || turboExtractId(url) || '' : '';
-      const turboKey = isTurbo ? (turboId ? `turbo:${turboId}` : `turbo-url:${url}`) : '';
+      const { turboId, turboKey } = turboTransferIdentity(isTurbo, url, original);
 
       const progressKey = isGoFile ? `${url}@@gofilepass${pass}` : url;
 
@@ -257,25 +269,29 @@ const runDownloadTransfers = async run => {
         await cyberdropWarmupOnce(attempt.cyberOrigin, attempt.cyberFilePage, CYBERDROP_WARMUP_MS);
       }
 
-      let switchedToDirect = false;
+      const transferState = { switchedToDirect: false, abortReason: '', bunkrMaintenanceHandled: false };
 
       const startDirectDownload = (metaHint = null) => {
-        switchedToDirect = true;
+        transferState.switchedToDirect = true;
         downloadResourceDirect(run, batchState, attempt, metaHint, actions);
       };
 
-      if (resource && resource.forceDirect) {
-        log.post.info(postId, `::Forced DIRECT (skip blob/ZIP)::: ${url}`, postNumber);
-        setTimeout(() => startDirectDownload(), TURBO_DIRECT_DELAY_MS);
-        return;
-      }
+      const scheduleInitialDirectDownload = () => {
+        if (resource && resource.forceDirect) {
+          log.post.info(postId, `::Forced DIRECT (skip blob/ZIP)::: ${url}`, postNumber);
+          setTimeout(() => startDirectDownload(), TURBO_DIRECT_DELAY_MS);
+          return true;
+        }
 
-      const isPixeldrainList = attempt.isPixeldrain && /pixeldrain\.com\/l\//i.test(String(original || ''));
-      if (isPixeldrainList) {
-        log.post.info(postId, `::Pixeldrain list (/l/) -> DIRECT (skip blob)::: ${url}`, postNumber);
-        setTimeout(() => startDirectDownload(), TURBO_DIRECT_DELAY_MS);
-        return;
-      }
+        const isPixeldrainList = attempt.isPixeldrain && /pixeldrain\.com\/l\//i.test(String(original || ''));
+        if (isPixeldrainList) {
+          log.post.info(postId, `::Pixeldrain list (/l/) -> DIRECT (skip blob)::: ${url}`, postNumber);
+          setTimeout(() => startDirectDownload(), TURBO_DIRECT_DELAY_MS);
+          return true;
+        }
+        return false;
+      };
+      if (scheduleInitialDirectDownload()) return;
 
       if (isGoFile || attempt.isPixeldrain || isFilester) {
         const meta0 = await batchState.metadata.readDownloadMetadata(url, { isGoFile, isPixeldrain: attempt.isPixeldrain });
@@ -286,14 +302,390 @@ const runDownloadTransfers = async run => {
         }
       }
 
-      let abortReason = '';
-      let bunkrMaintenanceHandled = false;
+      const reqHeaders = blobTransferHeaders(isFilester, url, resource, reflink);
 
-      const isTurboCdn = /turbocdn\.st/i.test(String(url || ''));
-      const filesterRef = isFilester
-        ? String(filesterRefByUrl.get(String(url)) || (resource && resource.original) || 'https://filester.me/')
-        : '';
-      const reqHeaders = isTurboCdn ? { Referer: 'https://turbo.cr/' } : isFilester ? { Referer: filesterRef } : { Referer: reflink };
+      const handleGoFileResponse = response => {
+        const mCt = /content-type:\s*([^\r\n]+)/i.exec(response.responseHeaders || '');
+        const ct = mCt && mCt[1] ? mCt[1] : '';
+        const isHtml = /text\/html|application\/xhtml\+xml/i.test(ct);
+        const badStatus = !response.status || response.status >= 400;
+
+        if (badStatus || isHtml) {
+          if (pass === 1 && !batchState.gofileWarmupAttempted.has(url)) {
+            batchState.gofileWarmupAttempted.add(url);
+            log.post.info(postId, `::GoFile warm-up -> open tab (${GOFILE_WARMUP_MS}ms) then retry [1/2]::: ${url}`, postNumber);
+            gofileWarmupOpenTab(url);
+            setTimeout(() => startDownload(resource, 2), GOFILE_WARMUP_MS);
+            return true;
+          }
+
+          actions.settle(attempt, {
+            statusColor: '#b23b3b',
+            updateStatus: true,
+            updateTotalProgress: true,
+            log: { level: 'error', message: `::GoFile failed (after retry)::: ${url}` },
+          });
+          return true;
+        }
+        return false;
+      };
+
+      const handleCyberdropResponse = response => {
+        const mCt = /content-type:\s*([^\r\n]+)/i.exec(response.responseHeaders || '');
+        const ct = mCt && mCt[1] ? mCt[1] : '';
+        const isGate = /text\/html|application\/xhtml\+xml|application\/json/i.test(ct);
+        const badStatus = !response.status || response.status >= 400;
+        const size = response.response && typeof response.response.size === 'number' ? response.response.size : 0;
+        const isTiny = size > 0 && size <= 16384;
+
+        if (badStatus || isGate || isTiny) {
+          if (pass === 1 && attempt.cyberOrigin && attempt.cyberFilePage) {
+            log.post.info(
+              postId,
+              `::Cyberdrop warm-up -> open tab (${CYBERDROP_WARMUP_MS}ms) then retry [1/2]::: ${attempt.cyberFilePage}`,
+              postNumber,
+            );
+            cyberdropWarmupOnce(attempt.cyberOrigin, attempt.cyberFilePage, CYBERDROP_WARMUP_MS)
+              .then(() => startDownload(resource, 2))
+              .catch(() => startDownload(resource, 2));
+            return true;
+          }
+
+          actions.settle(attempt, {
+            statusColor: '#b23b3b',
+            updateStatus: true,
+            updateTotalProgress: true,
+            log: { level: 'error', message: `::Cyberdrop failed (gate/tiny response)::: ${url}` },
+          });
+          return true;
+        }
+        return false;
+      };
+
+      const chooseFilesterCache = (token, preferLegacy = false) => {
+        const candidates = filesterCandidatesByToken.get(token) || filesterBuildCandidates(token);
+        let tried = filesterTriedByToken.get(token);
+        if (!tried) {
+          tried = new Set();
+          filesterTriedByToken.set(token, tried);
+        }
+        tried.add(String(url));
+        let preferredHost = null;
+        if (preferLegacy) {
+          if (/https?:\/\/cache6\.filester\.(me|sh|si|gg)\//i.test(String(url || ''))) {
+            preferredHost = /https?:\/\/cache1\.filester\.(me|sh|si|gg)\//i;
+          } else if (/https?:\/\/cache1\.filester\.(me|sh|si|gg)\//i.test(String(url || ''))) {
+            preferredHost = /https?:\/\/cache6\.filester\.(me|sh|si|gg)\//i;
+          }
+        }
+        const available = candidates || [];
+        let nextUrl = '';
+        if (preferredHost) {
+          nextUrl = available.find(candidate => preferredHost.test(candidate) && !tried.has(candidate)) || '';
+        }
+        if (!nextUrl) nextUrl = available.find(candidate => !tried.has(candidate)) || '';
+        if (nextUrl) tried.add(nextUrl);
+        return { nextUrl, tried, candidates: available };
+      };
+
+      const switchFilesterCache = nextUrl => {
+        try {
+          filesterRefByUrl.set(String(nextUrl), 'https://filester.me/');
+        } catch (e) {}
+        try {
+          resource.url = nextUrl;
+        } catch (e) {}
+        url = nextUrl;
+      };
+
+      const retryFilesterMissingCache = response => {
+        if (Number(response.status || 0) !== 404) return false;
+        const token = filesterTokenFromVUrl(String(url || ''));
+        if (!token) return false;
+        const { nextUrl, tried, candidates } = chooseFilesterCache(token);
+        if (!nextUrl) return false;
+        log.post.info(postId, `::Filester cache 404 -> try next cache [${tried.size}/${candidates.length}]::: ${nextUrl}`, postNumber);
+        switchFilesterCache(nextUrl);
+        startDownload(resource, pass);
+        return true;
+      };
+
+      const filesterRetryDelay = (response, retryCount) => {
+        let waitMs = 0;
+        const retryAfter = headerValue(response.responseHeaders || '', 'retry-after');
+        if (retryAfter) {
+          const seconds = Number(String(retryAfter).trim());
+          if (Number.isFinite(seconds) && seconds > 0) waitMs = Math.floor(seconds * 1000);
+        }
+        if (!waitMs) waitMs = 650 * retryCount + Math.floor(Math.random() * 250);
+        return Math.min(2500, Math.max(0, waitMs));
+      };
+
+      const filesterCacheSwitchInfo = nextUrl => {
+        let switchInfo = '';
+        try {
+          const fromU = String(url || '');
+          const toU = String(nextUrl || '');
+          if (toU && toU !== fromU) {
+            const mf = /https?:\/\/(cache\d+)\.filester\.(me|sh|si|gg)\//i.exec(fromU);
+            const mt = /https?:\/\/(cache\d+)\.filester\.(me|sh|si|gg)\//i.exec(toU);
+            if (mf && mt) switchInfo = `; switching ${mf[1]}->${mt[1]}`;
+            else if (mf && !mt) switchInfo = `; switching ${mf[1]}->other`;
+            else if (!mf && mt) switchInfo = `; switching other->${mt[1]}`;
+            else switchInfo = '; switching host';
+          }
+        } catch (e) {}
+        return switchInfo;
+      };
+
+      const retryFilesterTransientResponse = response => {
+        const status = Number(response.status || 0) || 0;
+        const isRetryable =
+          status === 429 ||
+          status === 400 ||
+          status === 403 ||
+          status === 408 ||
+          status === 409 ||
+          status === 425 ||
+          status === 500 ||
+          status === 502 ||
+          status === 503 ||
+          status === 504;
+        if (!isRetryable) return false;
+        const token = filesterTokenFromVUrl(String(url || ''));
+        const key = token || String(url || '');
+        const maxRetries = 3;
+        const retryCount = (Number(filesterRetryAttemptsByKey.get(key) || 0) || 0) + 1;
+        filesterRetryAttemptsByKey.set(key, retryCount);
+        const waitMs = filesterRetryDelay(response, retryCount);
+        // Selecting the candidate also records affinity, including on exhausted retries.
+        const nextUrl = token ? chooseFilesterCache(token, true).nextUrl : '';
+        if (retryCount > maxRetries) return false;
+        const target = nextUrl || String(url || '');
+        const switchInfo = filesterCacheSwitchInfo(nextUrl);
+        log.post.info(
+          postId,
+          `::Filester HTTP ${status} -> retry [${retryCount}/${maxRetries}] after ${waitMs}ms${switchInfo}::: ${target}`,
+          postNumber,
+        );
+        setTimeout(() => {
+          try {
+            if (nextUrl) switchFilesterCache(nextUrl);
+          } catch (e) {}
+          startDownload(resource, pass);
+        }, waitMs);
+        return true;
+      };
+
+      const inspectFilesterResponse = response => {
+        const mCt = /content-type:\s*([^\r\n]+)/i.exec(response.responseHeaders || '');
+        const ct = mCt && mCt[1] ? mCt[1] : '';
+        const isGate = /text\/html|application\/xhtml\+xml|application\/json/i.test(ct);
+        const badStatus = !response.status || response.status >= 400;
+
+        const blob = response.response;
+        const size = blob && typeof blob.size === 'number' ? blob.size : 0;
+
+        let hintSize = 0;
+        try {
+          const s0 = String(filesterSlugByUrl.get(String(url)) || '');
+          hintSize = Number(filesterSizeBySlug.get(s0) || filesterSizeByUrl.get(String(url)) || 0) || 0;
+        } catch (e) {
+          hintSize = 0;
+        }
+
+        // Only treat "tiny" as suspicious when we have a meaningful expected size.
+        const suspiciousTiny = !!hintSize && size > 0 && size <= 16384 && hintSize >= 32768;
+        return { badStatus, isGate, hintSize, suspiciousTiny };
+      };
+
+      const handleFilesterResponse = response => {
+        const { badStatus, isGate, hintSize, suspiciousTiny } = inspectFilesterResponse(response);
+        if (!badStatus && !isGate && !suspiciousTiny) return false;
+        if (pass === 1) {
+          // Try cache affinity and bounded transient retries before DIRECT.
+          if (badStatus && retryFilesterMissingCache(response)) return true;
+          if (badStatus && retryFilesterTransientResponse(response)) return true;
+          const isView = /https?:\/\/(?:www\.)?filester\.(me|sh|si|gg)\/d\//i.test(String(url || ''));
+          if (!isView) {
+            log.post.info(postId, `::Filester blocked/tiny response -> switch to DIRECT [1/2]::: ${url}`, postNumber);
+            startDirectDownload({ size: hintSize || 0 });
+            return true;
+          }
+
+          // If we only have a /d/ view URL, DIRECT would just save HTML.
+          actions.settle(attempt, {
+            statusColor: '#b23b3b',
+            updateStatus: true,
+            updateTotalProgress: true,
+            log: { level: 'error', message: `::Filester failed (resolved to /d/ HTML view)::: ${url}` },
+          });
+          return true;
+        }
+
+        const reason = badStatus ? `HTTP ${response.status || 0}` : isGate ? 'HTML/JSON gate' : 'tiny/blocked response';
+        actions.settle(attempt, {
+          statusColor: '#b23b3b',
+          updateStatus: true,
+          updateTotalProgress: true,
+          log: { level: 'error', message: `::Filester failed (${reason})::: ${url}` },
+        });
+        return true;
+      };
+
+      const bunkrTextLooksLikeHtml = text => {
+        const head = String(text || '')
+          .slice(0, 2048)
+          .toLowerCase();
+        return (
+          head.includes('<!doctype') ||
+          head.includes('<html') ||
+          head.includes('<head') ||
+          head.includes('<body') ||
+          head.includes('temporarily not available') ||
+          head.includes('maintenance') ||
+          head.includes('cloudflare')
+        );
+      };
+
+      const bunkrSkipReason = (response, isMaint, badStatus, isHtml) => {
+        return isMaint
+          ? 'maintenance redirect (maint.mp4)'
+          : badStatus
+            ? `HTTP ${response.status || 0}`
+            : isHtml
+              ? 'HTML/maintenance response'
+              : 'tiny HTML placeholder';
+      };
+
+      const inspectBunkrResponse = response => {
+        const mCt = /content-type:\s*([^\r\n]+)/i.exec(response.responseHeaders || '');
+        const ct = mCt && mCt[1] ? mCt[1] : '';
+        const isHtml = /text\/html|application\/xhtml\+xml/i.test(ct);
+        const badStatus = !response.status || response.status >= 400;
+
+        const bunkrFinalUrl = String(response.finalUrl || '');
+        const bunkrLoc = headerValue(response.responseHeaders || '', 'location');
+        const isMaint =
+          transferState.abortReason === 'bunkr_maint' || /\/maint\.mp4(\?|$)/i.test(bunkrFinalUrl) || /\/maint\.mp4(\?|$)/i.test(bunkrLoc);
+
+        const blob = response.response;
+        const size = blob && typeof blob.size === 'number' ? blob.size : 0;
+        const tinyLimit = 32768;
+
+        const inspectTiny = !isHtml && !badStatus && postSettings.verifyBunkrLinks && size > 0 && size <= tinyLimit;
+        return { blob, badStatus, isHtml, isMaint, inspectTiny };
+      };
+
+      const handleBunkrResponse = (response, inspection, tinyLooksLikeHtml) => {
+        const { badStatus, isHtml, isMaint } = inspection;
+        if (badStatus || isHtml || tinyLooksLikeHtml || isMaint) {
+          if (isMaint) transferState.bunkrMaintenanceHandled = true;
+
+          const reason = bunkrSkipReason(response, isMaint, badStatus, isHtml);
+          actions.settle(attempt, {
+            statusColor: '#b23b3b',
+            updateStatus: true,
+            updateTotalProgress: true,
+            log: { level: 'error', message: `::Bunkr skipped (${reason})::: ${url}` },
+          });
+          return true;
+        }
+        return false;
+      };
+
+      const saveCompletedBlob = response => {
+        actions.settle(attempt, { statusColor: '#2d9053', updateStatus: true, updateTotalProgress: true });
+
+        const planned = run.names.plan({
+          mode: 'blob',
+          resource,
+          url,
+          responseHeaders: response.responseHeaders || '',
+          zippedForThis,
+        });
+
+        const folder = (resource && resource.folderName) || '';
+
+        log.separator(postId);
+        log.post.info(postId, `::Completed::: ${url}`, postNumber);
+
+        if (folder && folder.trim() !== '') {
+          log.post.info(postId, `::Saving as::: ${planned.basename} ::to:: ${folder}`, postNumber);
+        } else {
+          log.post.info(postId, `::Saving as::: ${planned.basename}`, postNumber);
+        }
+
+        const fileBlob = response.response;
+
+        if (!zippedForThis) {
+          const blobUrl = URL.createObjectURL(fileBlob);
+          GM_download({
+            url: blobUrl,
+            name: planned.saveAsName,
+            onload: () => {
+              try {
+                URL.revokeObjectURL(blobUrl);
+              } catch (e) {}
+            },
+            onerror: response => {
+              console.log(`Error writing file ${planned.relativePath} to disk. There may be more details below.`);
+              console.log(response);
+              try {
+                URL.revokeObjectURL(blobUrl);
+              } catch (e) {}
+            },
+          });
+        }
+
+        if (zippedForThis) {
+          run.zip.file(planned.relativePath, fileBlob);
+          run.zipFileCount++;
+        }
+      };
+
+      const handleTurboStall = async stallMs => {
+        const st = batchState.turboRetryState.get(turboKey) || { resign: 0, direct: 0 };
+
+        if (st.resign < TURBO_RESIGN_RETRIES) {
+          st.resign++;
+          batchState.turboRetryState.set(turboKey, st);
+
+          log.post.info(
+            postId,
+            `::Turbo stalled (no progress for ${Math.round(stallMs / 1000)}s) -> re-sign + retry [${st.resign}/${TURBO_RESIGN_RETRIES}]::: ${url}`,
+            postNumber,
+          );
+
+          try {
+            const newUrl = await turboResignSignedUrl(turboId, url);
+            if (newUrl) {
+              resource.url = newUrl;
+            }
+          } catch (e) {}
+
+          // Retry even if re-signing failed; the current URL may still work.
+          setTimeout(() => startDownload(resource, pass + 1), st.resign >= 3 ? TURBO_RETRY_DELAY_MS * 2 : TURBO_RETRY_DELAY_MS);
+          return;
+        }
+
+        if (st.direct < TURBO_DIRECT_FALLBACKS) {
+          st.direct++;
+          batchState.turboRetryState.set(turboKey, st);
+
+          log.post.info(
+            postId,
+            `::Turbo stalled (no progress for ${Math.round(stallMs / 1000)}s) -> DIRECT fallback (outside ZIP) [${st.direct}/${TURBO_DIRECT_FALLBACKS}]::: ${url}`,
+            postNumber,
+          );
+          startDirectDownload();
+          return;
+        }
+
+        log.post.error(postId, `::Turbo failed (stalled after retries)::: ${url}`, postNumber);
+        actions.settle(attempt, { guardCompleted: true, resetBatchOnFull: true });
+        return;
+      };
 
       const request = GM_xmlhttpRequest({
         url,
@@ -306,11 +698,11 @@ const runDownloadTransfers = async run => {
             run.names.capture(url, response.responseHeaders || '');
 
             // Bunkr: detect maintenance placeholder redirect (maint.mp4) early and abort (skip).
-            if (isBunkr && !abortReason) {
+            if (isBunkr && !transferState.abortReason) {
               const loc = headerValue(response.responseHeaders || '', 'location');
               const fu = String(response.finalUrl || '');
               if (/\/maint\.mp4(\?|$)/i.test(loc) || /\/maint\.mp4(\?|$)/i.test(fu)) {
-                abortReason = 'bunkr_maint';
+                transferState.abortReason = 'bunkr_maint';
                 try {
                   request.abort();
                 } catch (e) {}
@@ -325,14 +717,14 @@ const runDownloadTransfers = async run => {
 
           // A late size report can exceed the blob limit; hand completion to DIRECT.
           if (
-            !switchedToDirect &&
+            !transferState.switchedToDirect &&
             (isGoFile || attempt.isPixeldrain || isFilester) &&
             response &&
             response.total &&
             response.total > DOWNLOAD_BLOB_MAX_BYTES
           ) {
             log.post.info(postId, `::Large file (${response.total} bytes > ~1.6GB) detected -> switch to DIRECT::: ${url}`, postNumber);
-            switchedToDirect = true;
+            transferState.switchedToDirect = true;
             try {
               request.abort();
             } catch (e) {}
@@ -340,9 +732,9 @@ const runDownloadTransfers = async run => {
             return;
           }
           // Bunkr: large videos cause MV3 port disconnection via blob; switch to direct download above 500MB.
-          if (!switchedToDirect && isBunkr && response && response.total && response.total > BUNKR_DIRECT_MIN_BYTES) {
+          if (!transferState.switchedToDirect && isBunkr && response && response.total && response.total > BUNKR_DIRECT_MIN_BYTES) {
             log.post.info(postId, `::Bunkr large file (${response.total} bytes > 500MB) -> switch to DIRECT::: ${url}`, postNumber);
-            switchedToDirect = true;
+            transferState.switchedToDirect = true;
             try {
               request.abort();
             } catch (e) {}
@@ -374,386 +766,30 @@ const runDownloadTransfers = async run => {
         onload: async response => {
           const p = batchState.requestProgress.find(r => r.url === progressKey);
           if (p) clearInterval(p.intervalId);
-          if (switchedToDirect) return;
-
-          if (abortReason === 'bunkr_maint' && bunkrMaintenanceHandled) return;
+          if (transferState.switchedToDirect) return;
+          if (transferState.abortReason === 'bunkr_maint' && transferState.bunkrMaintenanceHandled) return;
           // Buffered responses can survive abort(); only the newest GoFile pass may save.
           if (isGoFile && (batchState.gofileActivePass.get(url) || pass) > pass) return;
 
-          // GoFile: detect soft-block / HTML gate
-          if (isGoFile) {
-            const mCt = /content-type:\s*([^\r\n]+)/i.exec(response.responseHeaders || '');
-            const ct = mCt && mCt[1] ? mCt[1] : '';
-            const isHtml = /text\/html|application\/xhtml\+xml/i.test(ct);
-            const badStatus = !response.status || response.status >= 400;
-
-            if (badStatus || isHtml) {
-              if (pass === 1 && !batchState.gofileWarmupAttempted.has(url)) {
-                batchState.gofileWarmupAttempted.add(url);
-                log.post.info(postId, `::GoFile warm-up -> open tab (${GOFILE_WARMUP_MS}ms) then retry [1/2]::: ${url}`, postNumber);
-                gofileWarmupOpenTab(url);
-                setTimeout(() => startDownload(resource, 2), GOFILE_WARMUP_MS);
-                return;
-              }
-
-              actions.settle(attempt, {
-                statusColor: '#b23b3b',
-                updateStatus: true,
-                updateTotalProgress: true,
-                log: { level: 'error', message: `::GoFile failed (after retry)::: ${url}` },
-              });
-              return;
-            }
-          }
-
-          // Cyberdrop: detect anti-bot / API responses (often tiny JSON/HTML) and retry once after warm-up.
-          if (isCyberdrop) {
-            const mCt = /content-type:\s*([^\r\n]+)/i.exec(response.responseHeaders || '');
-            const ct = mCt && mCt[1] ? mCt[1] : '';
-            const isGate = /text\/html|application\/xhtml\+xml|application\/json/i.test(ct);
-            const badStatus = !response.status || response.status >= 400;
-            const size = response.response && typeof response.response.size === 'number' ? response.response.size : 0;
-            const isTiny = size > 0 && size <= 16384;
-
-            if (badStatus || isGate || isTiny) {
-              if (pass === 1 && attempt.cyberOrigin && attempt.cyberFilePage) {
-                log.post.info(
-                  postId,
-                  `::Cyberdrop warm-up -> open tab (${CYBERDROP_WARMUP_MS}ms) then retry [1/2]::: ${attempt.cyberFilePage}`,
-                  postNumber,
-                );
-                cyberdropWarmupOnce(attempt.cyberOrigin, attempt.cyberFilePage, CYBERDROP_WARMUP_MS)
-                  .then(() => startDownload(resource, 2))
-                  .catch(() => startDownload(resource, 2));
-                return;
-              }
-
-              actions.settle(attempt, {
-                statusColor: '#b23b3b',
-                updateStatus: true,
-                updateTotalProgress: true,
-                log: { level: 'error', message: `::Cyberdrop failed (gate/tiny response)::: ${url}` },
-              });
-              return;
-            }
-          }
-
-          // Filester: detect blocked/tiny responses (often an error thumbnail or HTML gate) and fall back to DIRECT once.
-          if (isFilester) {
-            const mCt = /content-type:\s*([^\r\n]+)/i.exec(response.responseHeaders || '');
-            const ct = mCt && mCt[1] ? mCt[1] : '';
-            const isGate = /text\/html|application\/xhtml\+xml|application\/json/i.test(ct);
-            const badStatus = !response.status || response.status >= 400;
-
-            const blob = response.response;
-            const size = blob && typeof blob.size === 'number' ? blob.size : 0;
-
-            let hintSize = 0;
-            try {
-              const s0 = String(filesterSlugByUrl.get(String(url)) || '');
-              hintSize = Number(filesterSizeBySlug.get(s0) || filesterSizeByUrl.get(String(url)) || 0) || 0;
-            } catch (e) {
-              hintSize = 0;
-            }
-
-            // Only treat "tiny" as suspicious when we have a meaningful expected size.
-            const suspiciousTiny = !!hintSize && size > 0 && size <= 16384 && hintSize >= 32768;
-
-            if (badStatus || isGate || suspiciousTiny) {
-              if (pass === 1) {
-                // Filester: some tokens are not available on cache6 (404). Try other cacheN hosts before falling back.
-                if (badStatus && Number(response.status || 0) === 404) {
-                  const token0 = filesterTokenFromVUrl(String(url || ''));
-                  if (token0) {
-                    const candidates0 = filesterCandidatesByToken.get(token0) || filesterBuildCandidates(token0);
-                    let tried0 = filesterTriedByToken.get(token0);
-                    if (!tried0) {
-                      tried0 = new Set();
-                      filesterTriedByToken.set(token0, tried0);
-                    }
-                    tried0.add(String(url));
-                    let nextUrl = '';
-                    for (const c of candidates0 || []) {
-                      if (!tried0.has(c)) {
-                        nextUrl = c;
-                        tried0.add(c);
-                        break;
-                      }
-                    }
-                    if (nextUrl) {
-                      log.post.info(
-                        postId,
-                        `::Filester cache 404 -> try next cache [${tried0.size}/${(candidates0 || []).length}]::: ${nextUrl}`,
-                        postNumber,
-                      );
-                      try {
-                        filesterRefByUrl.set(String(nextUrl), 'https://filester.me/');
-                      } catch (e) {}
-                      try {
-                        resource.url = nextUrl;
-                      } catch (e) {}
-                      url = nextUrl;
-                      startDownload(resource, pass);
-                      return;
-                    }
-                  }
-                }
-
-                // Retry transient errors with bounded delays and alternate legacy cache hosts.
-                if (badStatus) {
-                  const st0 = Number(response.status || 0) || 0;
-                  const isRetryable =
-                    st0 === 429 ||
-                    st0 === 400 ||
-                    st0 === 403 ||
-                    st0 === 408 ||
-                    st0 === 409 ||
-                    st0 === 425 ||
-                    st0 === 500 ||
-                    st0 === 502 ||
-                    st0 === 503 ||
-                    st0 === 504;
-
-                  if (isRetryable) {
-                    const token0 = filesterTokenFromVUrl(String(url || ''));
-                    const key0 = token0 || String(url || '');
-                    const max0 = 3;
-
-                    let a0 = Number(filesterRetryAttemptsByKey.get(key0) || 0) || 0;
-                    a0++;
-                    filesterRetryAttemptsByKey.set(key0, a0);
-
-                    let waitMs = 0;
-                    const ra0 = headerValue(response.responseHeaders || '', 'retry-after');
-                    if (ra0) {
-                      const n0 = Number(String(ra0).trim());
-                      if (Number.isFinite(n0) && n0 > 0) waitMs = Math.floor(n0 * 1000);
-                    }
-                    if (!waitMs) {
-                      waitMs = 650 * a0 + Math.floor(Math.random() * 250);
-                    }
-                    waitMs = Math.min(2500, Math.max(0, waitMs));
-
-                    let nextUrl = '';
-                    if (token0) {
-                      const candidates0 = filesterCandidatesByToken.get(token0) || filesterBuildCandidates(token0);
-                      let tried0 = filesterTriedByToken.get(token0);
-                      if (!tried0) {
-                        tried0 = new Set();
-                        filesterTriedByToken.set(token0, tried0);
-                      }
-                      tried0.add(String(url));
-
-                      const isOn6 = /https?:\/\/cache6\.filester\.(me|sh|si|gg)\//i.test(String(url || ''));
-                      const isOn1 = /https?:\/\/cache1\.filester\.(me|sh|si|gg)\//i.test(String(url || ''));
-
-                      // Prefer swapping cache6 <-> cache1 first.
-                      if (isOn6) {
-                        for (const c of candidates0 || []) {
-                          if (/https?:\/\/cache1\.filester\.(me|sh|si|gg)\//i.test(c) && !tried0.has(c)) {
-                            nextUrl = c;
-                            tried0.add(c);
-                            break;
-                          }
-                        }
-                      } else if (isOn1) {
-                        for (const c of candidates0 || []) {
-                          if (/https?:\/\/cache6\.filester\.(me|sh|si|gg)\//i.test(c) && !tried0.has(c)) {
-                            nextUrl = c;
-                            tried0.add(c);
-                            break;
-                          }
-                        }
-                      }
-
-                      if (!nextUrl) {
-                        for (const c of candidates0 || []) {
-                          if (!tried0.has(c)) {
-                            nextUrl = c;
-                            tried0.add(c);
-                            break;
-                          }
-                        }
-                      }
-                    }
-
-                    if (a0 <= max0) {
-                      const tgt = nextUrl || String(url || '');
-                      let switchInfo = '';
-                      try {
-                        const fromU = String(url || '');
-                        const toU = String(nextUrl || '');
-                        if (toU && toU !== fromU) {
-                          const mf = /https?:\/\/(cache\d+)\.filester\.(me|sh|si|gg)\//i.exec(fromU);
-                          const mt = /https?:\/\/(cache\d+)\.filester\.(me|sh|si|gg)\//i.exec(toU);
-                          if (mf && mt) switchInfo = `; switching ${mf[1]}->${mt[1]}`;
-                          else if (mf && !mt) switchInfo = `; switching ${mf[1]}->other`;
-                          else if (!mf && mt) switchInfo = `; switching other->${mt[1]}`;
-                          else switchInfo = '; switching host';
-                        }
-                      } catch (e) {}
-                      log.post.info(
-                        postId,
-                        `::Filester HTTP ${st0} -> retry [${a0}/${max0}] after ${waitMs}ms${switchInfo}::: ${tgt}`,
-                        postNumber,
-                      );
-
-                      setTimeout(() => {
-                        try {
-                          if (nextUrl) {
-                            try {
-                              filesterRefByUrl.set(String(nextUrl), 'https://filester.me/');
-                            } catch (e) {}
-                            try {
-                              resource.url = nextUrl;
-                            } catch (e) {}
-                            url = nextUrl;
-                          }
-                        } catch (e) {}
-                        startDownload(resource, pass);
-                      }, waitMs);
-
-                      return;
-                    }
-                  }
-                }
-
-                const isView = /https?:\/\/(?:www\.)?filester\.(me|sh|si|gg)\/d\//i.test(String(url || ''));
-                if (!isView) {
-                  log.post.info(postId, `::Filester blocked/tiny response -> switch to DIRECT [1/2]::: ${url}`, postNumber);
-                  startDirectDownload({ size: hintSize || 0 });
-                  return;
-                }
-
-                // If we only have a /d/ view URL, DIRECT would just save HTML.
-                actions.settle(attempt, {
-                  statusColor: '#b23b3b',
-                  updateStatus: true,
-                  updateTotalProgress: true,
-                  log: { level: 'error', message: `::Filester failed (resolved to /d/ HTML view)::: ${url}` },
-                });
-                return;
-              }
-
-              const reason = badStatus ? `HTTP ${response.status || 0}` : isGate ? 'HTML/JSON gate' : 'tiny/blocked response';
-              actions.settle(attempt, {
-                statusColor: '#b23b3b',
-                updateStatus: true,
-                updateTotalProgress: true,
-                log: { level: 'error', message: `::Filester failed (${reason})::: ${url}` },
-              });
-              return;
-            }
-          }
-
-          // Bunkr: skip maintenance/dead placeholder responses (often tiny HTML) instead of saving a tiny file.
+          if (isGoFile && handleGoFileResponse(response)) return;
+          if (isCyberdrop && handleCyberdropResponse(response)) return;
+          if (isFilester && handleFilesterResponse(response)) return;
           if (isBunkr) {
-            const mCt = /content-type:\s*([^\r\n]+)/i.exec(response.responseHeaders || '');
-            const ct = mCt && mCt[1] ? mCt[1] : '';
-            const isHtml = /text\/html|application\/xhtml\+xml/i.test(ct);
-            const badStatus = !response.status || response.status >= 400;
-
-            const bunkrFinalUrl = String(response.finalUrl || '');
-            const bunkrLoc = headerValue(response.responseHeaders || '', 'location');
-            const isMaint =
-              abortReason === 'bunkr_maint' || /\/maint\.mp4(\?|$)/i.test(bunkrFinalUrl) || /\/maint\.mp4(\?|$)/i.test(bunkrLoc);
-
-            const blob = response.response;
-            const size = blob && typeof blob.size === 'number' ? blob.size : 0;
-            const tinyLimit = 32768;
-
+            const inspection = inspectBunkrResponse(response);
             let tinyLooksLikeHtml = false;
-            if (!isHtml && !badStatus && postSettings.verifyBunkrLinks && size > 0 && size <= tinyLimit) {
+            if (inspection.inspectTiny) {
               try {
-                const t = await blob.text();
-                const head = String(t || '')
-                  .slice(0, 2048)
-                  .toLowerCase();
-                tinyLooksLikeHtml =
-                  head.includes('<!doctype') ||
-                  head.includes('<html') ||
-                  head.includes('<head') ||
-                  head.includes('<body') ||
-                  head.includes('temporarily not available') ||
-                  head.includes('maintenance') ||
-                  head.includes('cloudflare');
-              } catch (e) {
-                tinyLooksLikeHtml = false;
-              }
+                tinyLooksLikeHtml = bunkrTextLooksLikeHtml(await inspection.blob.text());
+              } catch (e) {}
             }
-
-            if (badStatus || isHtml || tinyLooksLikeHtml || isMaint) {
-              if (isMaint) bunkrMaintenanceHandled = true;
-
-              const reason = isMaint
-                ? 'maintenance redirect (maint.mp4)'
-                : badStatus
-                  ? `HTTP ${response.status || 0}`
-                  : isHtml
-                    ? 'HTML/maintenance response'
-                    : 'tiny HTML placeholder';
-              actions.settle(attempt, {
-                statusColor: '#b23b3b',
-                updateStatus: true,
-                updateTotalProgress: true,
-                log: { level: 'error', message: `::Bunkr skipped (${reason})::: ${url}` },
-              });
-              return;
-            }
+            if (handleBunkrResponse(response, inspection, tinyLooksLikeHtml)) return;
           }
-
-          actions.settle(attempt, { statusColor: '#2d9053', updateStatus: true, updateTotalProgress: true });
-
-          const planned = run.names.plan({
-            mode: 'blob',
-            resource,
-            url,
-            responseHeaders: response.responseHeaders || '',
-            zippedForThis,
-          });
-
-          const folder = (resource && resource.folderName) || '';
-
-          log.separator(postId);
-          log.post.info(postId, `::Completed::: ${url}`, postNumber);
-
-          if (folder && folder.trim() !== '') {
-            log.post.info(postId, `::Saving as::: ${planned.basename} ::to:: ${folder}`, postNumber);
-          } else {
-            log.post.info(postId, `::Saving as::: ${planned.basename}`, postNumber);
-          }
-
-          const fileBlob = response.response;
-
-          if (!zippedForThis) {
-            const blobUrl = URL.createObjectURL(fileBlob);
-            GM_download({
-              url: blobUrl,
-              name: planned.saveAsName,
-              onload: () => {
-                try {
-                  URL.revokeObjectURL(blobUrl);
-                } catch (e) {}
-              },
-              onerror: response => {
-                console.log(`Error writing file ${planned.relativePath} to disk. There may be more details below.`);
-                console.log(response);
-                try {
-                  URL.revokeObjectURL(blobUrl);
-                } catch (e) {}
-              },
-            });
-          }
-
-          if (zippedForThis) {
-            run.zip.file(planned.relativePath, fileBlob);
-            run.zipFileCount++;
-          }
+          saveCompletedBlob(response);
         },
 
         onabort: () => {
-          if (abortReason !== 'bunkr_maint' || bunkrMaintenanceHandled) return;
-          bunkrMaintenanceHandled = true;
+          if (transferState.abortReason !== 'bunkr_maint' || transferState.bunkrMaintenanceHandled) return;
+          transferState.bunkrMaintenanceHandled = true;
 
           const p = batchState.requestProgress.find(r => r.url === progressKey);
           if (p) clearInterval(p.intervalId);
@@ -770,7 +806,7 @@ const runDownloadTransfers = async run => {
           const p = batchState.requestProgress.find(r => r.url === progressKey);
           if (p) clearInterval(p.intervalId);
 
-          if (switchedToDirect) return;
+          if (transferState.switchedToDirect) return;
 
           if (isGoFile && pass === 1 && !batchState.gofileWarmupAttempted.has(url)) {
             batchState.gofileWarmupAttempted.add(url);
@@ -788,81 +824,39 @@ const runDownloadTransfers = async run => {
 
       const stallMs = isTurbo ? TURBO_STALL_MS : 30000;
 
-      const intervalId = setInterval(async () => {
+      const checkTransferStall = async () => {
         const p = batchState.requestProgress.find(r => r.url === progressKey);
         if (!p) return;
         // The direct transfer owns completion after a large-file handoff.
-        if (switchedToDirect) {
+        if (transferState.switchedToDirect) {
           clearInterval(p.intervalId);
           return;
         }
-
-        if (p.old === p.new) {
-          const rr = batchState.requests.find(r => r.url === progressKey);
-          if (rr && rr.request) rr.request.abort();
-          clearInterval(p.intervalId);
-
-          // Turbo: fast re-sign + retry, then (optional) direct fallback.
-          if (isTurbo) {
-            const st = batchState.turboRetryState.get(turboKey) || { resign: 0, direct: 0 };
-
-            if (st.resign < TURBO_RESIGN_RETRIES) {
-              st.resign++;
-              batchState.turboRetryState.set(turboKey, st);
-
-              log.post.info(
-                postId,
-                `::Turbo stalled (no progress for ${Math.round(stallMs / 1000)}s) -> re-sign + retry [${st.resign}/${TURBO_RESIGN_RETRIES}]::: ${url}`,
-                postNumber,
-              );
-
-              try {
-                const newUrl = await turboResignSignedUrl(turboId, url);
-                if (newUrl) {
-                  resource.url = newUrl;
-                }
-              } catch (e) {}
-
-              // Retry even if re-signing failed; the current URL may still work.
-              setTimeout(() => startDownload(resource, pass + 1), st.resign >= 3 ? TURBO_RETRY_DELAY_MS * 2 : TURBO_RETRY_DELAY_MS);
-              return;
-            }
-
-            if (st.direct < TURBO_DIRECT_FALLBACKS) {
-              st.direct++;
-              batchState.turboRetryState.set(turboKey, st);
-
-              log.post.info(
-                postId,
-                `::Turbo stalled (no progress for ${Math.round(stallMs / 1000)}s) -> DIRECT fallback (outside ZIP) [${st.direct}/${TURBO_DIRECT_FALLBACKS}]::: ${url}`,
-                postNumber,
-              );
-              startDirectDownload();
-              return;
-            }
-
-            log.post.error(postId, `::Turbo failed (stalled after retries)::: ${url}`, postNumber);
-            actions.settle(attempt, { guardCompleted: true, resetBatchOnFull: true });
-            return;
-          }
-
-          log.post.error(postId, `::Stalled/Failed::: ${url}`, postNumber);
-
-          if (isGoFile && pass === 1 && !batchState.gofileWarmupAttempted.has(url)) {
-            batchState.gofileWarmupAttempted.add(url);
-            log.post.info(postId, `::GoFile stalled -> warm-up tab (${GOFILE_WARMUP_MS}ms) then retry [1/2]::: ${url}`, postNumber);
-            // abort() may leave a buffered onload; pass 2 alone owns saving the file.
-            batchState.gofileActivePass.set(url, 2);
-            gofileWarmupOpenTab(url);
-            setTimeout(() => startDownload(resource, 2), GOFILE_WARMUP_MS);
-            return;
-          }
-
-          actions.settle(attempt, { guardCompleted: true, resetBatchOnFull: true });
-        } else {
+        if (p.old !== p.new) {
           p.old = p.new;
+          return;
         }
-      }, stallMs);
+
+        const rr = batchState.requests.find(r => r.url === progressKey);
+        if (rr && rr.request) rr.request.abort();
+        clearInterval(p.intervalId);
+        if (isTurbo) return handleTurboStall(stallMs);
+
+        log.post.error(postId, `::Stalled/Failed::: ${url}`, postNumber);
+
+        if (isGoFile && pass === 1 && !batchState.gofileWarmupAttempted.has(url)) {
+          batchState.gofileWarmupAttempted.add(url);
+          log.post.info(postId, `::GoFile stalled -> warm-up tab (${GOFILE_WARMUP_MS}ms) then retry [1/2]::: ${url}`, postNumber);
+          // abort() may leave a buffered onload; pass 2 alone owns saving the file.
+          batchState.gofileActivePass.set(url, 2);
+          gofileWarmupOpenTab(url);
+          setTimeout(() => startDownload(resource, 2), GOFILE_WARMUP_MS);
+          return;
+        }
+
+        actions.settle(attempt, { guardCompleted: true, resetBatchOnFull: true });
+      };
+      const intervalId = setInterval(checkTransferStall, stallMs);
 
       batchState.requestProgress.push({ url: progressKey, intervalId, old: 0, new: 0 });
     };

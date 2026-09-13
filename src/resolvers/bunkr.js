@@ -1,3 +1,24 @@
+const xfpdBunkrStripUrl = value =>
+  String(value || '')
+    .split('#')[0]
+    .split('?')[0];
+
+const xfpdBunkrDecodeFinalUrl = data => {
+  try {
+    if (!data || !data.url) return null;
+    if (!data.encrypted) return data.url;
+
+    const binaryString = atob(data.url);
+    const keyBytes = new TextEncoder().encode(`SECRET_KEY_${Math.floor(data.timestamp / 3600)}`);
+
+    return Array.from(binaryString)
+      .map((char, i) => String.fromCharCode(char.charCodeAt(0) ^ keyBytes[i % keyBytes.length]))
+      .join('');
+  } catch (e) {
+    return null;
+  }
+};
+
 resolvers.push([
   [
     /((stream|cdn(\d+)?)\.)?bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|su|org).*?\.|((i|cdn)(\d+)?\.)?bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|su|org)\/(v\/)?/i,
@@ -28,10 +49,6 @@ resolvers.push([
 
       // Recover the original filename before resolution replaces it with a CDN GUID.
       try {
-        const strip = s =>
-          String(s || '')
-            .split('#')[0]
-            .split('?')[0];
         const bases = xfpdBunkrFilterBases(
           isLegacyCdn ? ['https://bunkr.cr', 'https://bunkr.pk'] : [origin, 'https://bunkr.pk', 'https://bunkr.cr'],
         );
@@ -70,9 +87,9 @@ resolvers.push([
 
             if (title && !xfpdLooksLikeCfFilenameHint(title)) {
               bunkrNameByUrl.set(cleanUrl, title);
-              bunkrNameByUrl.set(strip(cleanUrl), title);
+              bunkrNameByUrl.set(xfpdBunkrStripUrl(cleanUrl), title);
               bunkrNameByUrl.set(viewUrl, title);
-              bunkrNameByUrl.set(strip(viewUrl), title);
+              bunkrNameByUrl.set(xfpdBunkrStripUrl(viewUrl), title);
               found = true;
               break;
             }
@@ -81,22 +98,6 @@ resolvers.push([
           if (found) break;
         }
       } catch (e) {}
-
-      const decodeFinalUrl = data => {
-        try {
-          if (!data || !data.url) return null;
-          if (!data.encrypted) return data.url;
-
-          const binaryString = atob(data.url);
-          const keyBytes = new TextEncoder().encode(`SECRET_KEY_${Math.floor(data.timestamp / 3600)}`);
-
-          return Array.from(binaryString)
-            .map((char, i) => String.fromCharCode(char.charCodeAt(0) ^ keyBytes[i % keyBytes.length]))
-            .join('');
-        } catch (e) {
-          return null;
-        }
-      };
 
       const tryNewApi = async () => {
         if (!bunkrDataId) return null;
@@ -117,7 +118,7 @@ resolvers.push([
           const data = JSON.parse(text);
           if (!data) return null;
 
-          let finalUrl = decodeFinalUrl(data);
+          let finalUrl = xfpdBunkrDecodeFinalUrl(data);
           if (!finalUrl || typeof finalUrl !== 'string') return null;
           finalUrl = finalUrl.trim();
           if (finalUrl.startsWith('//')) finalUrl = 'https:' + finalUrl;
@@ -125,17 +126,14 @@ resolvers.push([
           finalUrl = await xfpdBunkrSignCdnUrl(http, finalUrl);
 
           try {
-            const strip = s =>
-              String(s || '')
-                .split('#')[0]
-                .split('?')[0];
-            const hint = xfpdBunkrExtractNameFromVsData(data) || bunkrNameByUrl.get(cleanUrl) || bunkrNameByUrl.get(strip(cleanUrl)) || '';
+            const hint =
+              xfpdBunkrExtractNameFromVsData(data) || bunkrNameByUrl.get(cleanUrl) || bunkrNameByUrl.get(xfpdBunkrStripUrl(cleanUrl)) || '';
             if (hint && String(hint).trim()) {
               const h0 = String(hint).trim();
               bunkrNameByUrl.set(cleanUrl, h0);
-              bunkrNameByUrl.set(strip(cleanUrl), h0);
+              bunkrNameByUrl.set(xfpdBunkrStripUrl(cleanUrl), h0);
               bunkrNameByUrl.set(finalUrl, h0);
-              bunkrNameByUrl.set(strip(finalUrl), h0);
+              bunkrNameByUrl.set(xfpdBunkrStripUrl(finalUrl), h0);
             }
           } catch (e) {}
 
@@ -169,26 +167,14 @@ resolvers.push([
     let firstDom = null;
     let firstSource = null;
 
-    const sanitizeName = s =>
-      String(s || '')
+    const getAlbumFolderName = dom => {
+      const h1 = dom?.querySelector?.('h1');
+      const title = (h1?.innerText || h1?.textContent || '').split('\n')[0]?.trim();
+      if (!title) return null;
+      return String(title)
         .replace(/[\\/:*?"<>|]/g, '-')
         .replace(/\s+/g, ' ')
         .trim();
-
-    const decodeFinalUrl = data => {
-      try {
-        if (!data || !data.url) return null;
-        if (!data.encrypted) return data.url;
-
-        const binaryString = atob(data.url);
-        const keyBytes = new TextEncoder().encode(`SECRET_KEY_${Math.floor(data.timestamp / 3600)}`);
-
-        return Array.from(binaryString)
-          .map((char, i) => String.fromCharCode(char.charCodeAt(0) ^ keyBytes[i % keyBytes.length]))
-          .join('');
-      } catch (e) {
-        return null;
-      }
     };
 
     const extractSlugsFromDom = dom => {
@@ -252,8 +238,6 @@ resolvers.push([
       }
     })();
 
-    const vsBasesAll = [origin, 'https://bunkr.pk', 'https://bunkr.cr'].filter((v, i, a) => a.indexOf(v) === i);
-
     let folderName = null;
 
     const MAX_PAGES = 500;
@@ -279,27 +263,17 @@ resolvers.push([
     const albumBasesAll = [origin, 'https://bunkr.pk', 'https://bunkr.cr'].filter((v, i, a) => a.indexOf(v) === i);
     let albumBaseChosen = null;
 
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const requestedPageUrl = `${baseUrl}?page=${page}`;
-
-      if (typeof progressCB === 'function') {
-        progressCB(`Resolving: ${requestedPageUrl}`);
-      }
-
+    const fetchAlbumPage = async page => {
       const pageBases = albumBaseChosen
         ? [albumBaseChosen, ...xfpdBunkrFilterBases(albumBasesAll).filter(b => b !== albumBaseChosen)]
         : xfpdBunkrFilterBases(albumBasesAll);
-
       let dom = null,
         source = '';
-      let pageUrl = requestedPageUrl;
       let slugs = [];
 
       for (const base of pageBases) {
         const base0 = String(base || '').replace(/\/$/, '');
         const candidate = `${base0}${albumPath}?page=${page}`;
-        pageUrl = candidate;
-
         try {
           ({ dom, source } = await xfpdBunkrGetWithCfRetry(http, candidate, base0, base0 === 'https://bunkr.cr'));
         } catch (e) {
@@ -308,15 +282,84 @@ resolvers.push([
         }
 
         if (xfpdLooksLikeCfChallenge(source, dom)) continue;
-
         slugs = extractSlugsFromDom(dom);
-        if (page === 1 && !slugs.length) {
-          continue;
-        }
-
+        if (page === 1 && !slugs.length) continue;
         if (!albumBaseChosen) albumBaseChosen = base0;
         break;
       }
+
+      return { dom, source, slugs };
+    };
+
+    const collectFreshSlugs = slugs => {
+      const fresh = [];
+      for (const slug of slugs) {
+        if (!slug || seen.has(slug)) continue;
+        seen.add(slug);
+        fresh.push(slug);
+      }
+      return fresh;
+    };
+
+    const resolveAlbumSlug = async slug => {
+      // The API requires the numeric file ID from /f/{slug}.
+      const fileBase = String(albumBaseChosen || origin || 'https://bunkr.cr').replace(/\/$/, '');
+      const filePageUrl = `${fileBase}/f/${slug}`;
+      let dataId = null;
+      try {
+        const fileRes = await xfpdBunkrGetWithCfRetry(http, filePageUrl, fileBase, fileBase === 'https://bunkr.cr');
+        const fileDom = fileRes?.dom;
+        if (fileDom && !xfpdLooksLikeCfChallenge(fileRes?.source || '', fileDom)) {
+          dataId = fileDom?.querySelector?.('[data-file-id]')?.getAttribute?.('data-file-id') || null;
+        }
+      } catch (e) {}
+      if (!dataId) return null;
+
+      let data = null;
+      try {
+        const refererUrl = `https://get.bunkrr.su/file/${dataId}`;
+        const response = await http.post(
+          'https://apidl.bunkr.ru/api/_001_v2',
+          JSON.stringify({ id: dataId }),
+          {},
+          {
+            'Content-Type': 'application/json',
+            Referer: refererUrl,
+            Origin: 'https://get.bunkrr.su',
+          },
+        );
+        const text = String(response?.source || '');
+        data = text ? JSON.parse(text) : null;
+      } catch (e) {}
+      if (!data) return null;
+
+      let finalUrl = xfpdBunkrDecodeFinalUrl(data);
+      if (!finalUrl || typeof finalUrl !== 'string') return null;
+      finalUrl = finalUrl.trim();
+      if (finalUrl.startsWith('//')) finalUrl = 'https:' + finalUrl;
+
+      finalUrl = await xfpdBunkrSignCdnUrl(http, finalUrl);
+
+      try {
+        const hint = nameHintBySlug.get(slug) || xfpdBunkrExtractNameFromVsData(data) || '';
+        if (hint && String(hint).trim()) {
+          const h0 = String(hint).trim();
+          bunkrNameByUrl.set(finalUrl, h0);
+          bunkrNameByUrl.set(xfpdBunkrStripUrl(finalUrl), h0);
+        }
+      } catch (e) {}
+
+      return finalUrl;
+    };
+
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const requestedPageUrl = `${baseUrl}?page=${page}`;
+
+      if (typeof progressCB === 'function') {
+        progressCB(`Resolving: ${requestedPageUrl}`);
+      }
+
+      const { dom, source, slugs } = await fetchAlbumPage(page);
 
       if (!dom) break;
       if (!slugs.length) break;
@@ -324,74 +367,14 @@ resolvers.push([
         firstDom = dom;
         firstSource = source;
 
-        const h1 = dom?.querySelector?.('h1');
-        const title = (h1?.innerText || h1?.textContent || '').split('\n')[0]?.trim();
-        if (title) folderName = sanitizeName(title);
+        folderName = getAlbumFolderName(dom);
       }
 
-      const fresh = [];
-      for (const s of slugs) {
-        if (!s || seen.has(s)) continue;
-        seen.add(s);
-        fresh.push(s);
-      }
+      const fresh = collectFreshSlugs(slugs);
 
       if (!fresh.length) break;
 
-      const urls = await asyncPool(CONCURRENCY, fresh, async slug => {
-        // The API requires the numeric file ID from /f/{slug}.
-        const fileBase = String(albumBaseChosen || origin || 'https://bunkr.cr').replace(/\/$/, '');
-        const filePageUrl = `${fileBase}/f/${slug}`;
-        let dataId = null;
-        try {
-          const fileRes = await xfpdBunkrGetWithCfRetry(http, filePageUrl, fileBase, fileBase === 'https://bunkr.cr');
-          const fileDom = fileRes?.dom;
-          if (fileDom && !xfpdLooksLikeCfChallenge(fileRes?.source || '', fileDom)) {
-            dataId = fileDom?.querySelector?.('[data-file-id]')?.getAttribute?.('data-file-id') || null;
-          }
-        } catch (e) {}
-        if (!dataId) return null;
-
-        let data = null;
-        try {
-          const refererUrl = `https://get.bunkrr.su/file/${dataId}`;
-          const response = await http.post(
-            'https://apidl.bunkr.ru/api/_001_v2',
-            JSON.stringify({ id: dataId }),
-            {},
-            {
-              'Content-Type': 'application/json',
-              Referer: refererUrl,
-              Origin: 'https://get.bunkrr.su',
-            },
-          );
-          const text = String(response?.source || '');
-          data = text ? JSON.parse(text) : null;
-        } catch (e) {}
-        if (!data) return null;
-
-        let finalUrl = decodeFinalUrl(data);
-        if (!finalUrl || typeof finalUrl !== 'string') return null;
-        finalUrl = finalUrl.trim();
-        if (finalUrl.startsWith('//')) finalUrl = 'https:' + finalUrl;
-
-        finalUrl = await xfpdBunkrSignCdnUrl(http, finalUrl);
-
-        try {
-          const strip = s =>
-            String(s || '')
-              .split('#')[0]
-              .split('?')[0];
-          const hint = nameHintBySlug.get(slug) || xfpdBunkrExtractNameFromVsData(data) || '';
-          if (hint && String(hint).trim()) {
-            const h0 = String(hint).trim();
-            bunkrNameByUrl.set(finalUrl, h0);
-            bunkrNameByUrl.set(strip(finalUrl), h0);
-          }
-        } catch (e) {}
-
-        return finalUrl;
-      });
+      const urls = await asyncPool(CONCURRENCY, fresh, resolveAlbumSlug);
 
       for (const u of urls) if (u) resolved.push(u);
     }

@@ -1,3 +1,103 @@
+const filesterCleanAlbumTitle = value => {
+  let title = String(value || '').trim();
+  if (!title) return '';
+
+  title = title.replace(/\s*\|\s*filester\.(me|sh|si|gg)\s*$/i, '').trim();
+  title = title.replace(/\s*-\s*filester\.(me|sh|si|gg)\s*$/i, '').trim();
+
+  // Replace remaining pipes with a Windows-safe separator.
+  if (title.includes('|')) title = title.replace(/\s*\|\s*/g, ' - ').trim();
+  return title.replace(/\s+/g, ' ').trim();
+};
+
+const filesterIsBadAlbumTitle = title => {
+  const value = String(title || '').trim();
+  return !value || /^filester\.(me|sh|si|gg)\b/i.test(value) || /BETA\s*\d/i.test(value);
+};
+
+const filesterAlbumTitleFromDom = dom => {
+  for (const selector of ['meta[property="og:title"]', 'meta[name="og:title"]']) {
+    const title = filesterCleanAlbumTitle(dom?.querySelector(selector)?.getAttribute('content') || '');
+    if (title) return title;
+  }
+  return filesterCleanAlbumTitle(dom?.querySelector('title')?.textContent || '');
+};
+
+const filesterAlbumTitleFromHtml = (html, title) => {
+  const source = String(html || '');
+  if (!source) return title;
+
+  // HTML fallback (order-independent meta parsing)
+  const metaTag =
+    /<meta\b[^>]*\b(?:property|name)=["']og:title["'][^>]*>/i.exec(source) ||
+    /<meta\b[^>]*\bcontent=["'][^"']+["'][^>]*\b(?:property|name)=["']og:title["'][^>]*>/i.exec(source);
+  if (metaTag && metaTag[0]) {
+    const content = /\bcontent=["']([^"']+)["']/i.exec(metaTag[0]);
+    if (content && content[1]) title = filesterCleanAlbumTitle(content[1]);
+  }
+
+  if (filesterIsBadAlbumTitle(title)) {
+    const titleTag = /<title[^>]*>\s*([^<]+?)\s*<\/title>/i.exec(source);
+    if (titleTag && titleTag[1]) title = filesterCleanAlbumTitle(titleTag[1]);
+  }
+  return title;
+};
+
+const filesterAlbumFolderName = (dom, html, albumId) => {
+  try {
+    let title = filesterAlbumTitleFromDom(dom);
+    if (filesterIsBadAlbumTitle(title)) title = filesterAlbumTitleFromHtml(html, title);
+    return filesterIsBadAlbumTitle(title) ? albumId : title;
+  } catch (e) {}
+  return albumId;
+};
+
+const filesterAlbumItemSlug = el => {
+  const onclick = String(el.getAttribute('onclick') || '');
+  const direct = /\/d\/([^'"?\s]+)/i.exec(onclick);
+  if (direct && direct[1]) return direct[1];
+
+  const button = el.querySelector('button.download-btn');
+  const buttonOnclick = String(button?.getAttribute?.('onclick') || '');
+  const download = /downloadFile\(\s*'([^']+)'/i.exec(buttonOnclick);
+  if (download && download[1]) return download[1];
+
+  const anchor = el.querySelector('a[href*="/d/"]');
+  const href = String(anchor?.getAttribute?.('href') || '');
+  const link = /\/d\/([^\/?#]+)/i.exec(href);
+  return link && link[1] ? link[1] : '';
+};
+
+const filesterAppendAlbumHtmlEntries = (html, entries) => {
+  const source = String(html || '');
+  if (!source) return;
+  const pattern = /data-name="([^"]+)"[^>]*\bonclick="window\.location\.href='\/d\/([^']+)'/gi;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    const name = String(match[1] || '').trim();
+    const slug = String(match[2] || '').trim();
+    if (slug) entries.push({ slug, name, size: 0 });
+  }
+};
+
+const filesterParseAlbumPage = (dom, html) => {
+  const entries = [];
+  const items = dom ? [...dom.querySelectorAll('div.file-item')] : [];
+  for (const el of items) {
+    const slug = filesterAlbumItemSlug(el);
+    if (!slug) continue;
+
+    let name = String(el.getAttribute('data-name') || '').trim();
+    if (!name) name = String(el.querySelector('.file-name')?.textContent || '').trim();
+    const size = Number(el.getAttribute('data-size') || 0) || 0;
+    entries.push({ slug, name, size });
+  }
+
+  // Regex fallback if DOM parsing is incomplete; DOM entries retain precedence.
+  filesterAppendAlbumHtmlEntries(html, entries);
+  return entries;
+};
+
 resolvers.push([
   [/filester\.(me|sh|si|gg)\/f\//],
   async (url, http, spoilers, postId, postSettings, progressCB) => {
@@ -24,63 +124,6 @@ resolvers.push([
 
       const MAX_PAGES = 500;
 
-      const getFolderName = (dom, html) => {
-        try {
-          const pickClean = s => {
-            s = String(s || '').trim();
-            if (!s) return '';
-
-            s = s.replace(/\s*\|\s*filester\.(me|sh|si|gg)\s*$/i, '').trim();
-            s = s.replace(/\s*-\s*filester\.(me|sh|si|gg)\s*$/i, '').trim();
-
-            // Replace remaining pipes with a Windows-safe separator.
-            if (s.includes('|')) s = s.replace(/\s*\|\s*/g, ' - ').trim();
-
-            s = s.replace(/\s+/g, ' ').trim();
-
-            return s;
-          };
-
-          const isBad = t => {
-            const x = String(t || '').trim();
-            if (!x) return true;
-            if (/^filester\.(me|sh|si|gg)\b/i.test(x)) return true;
-            if (/BETA\s*\d/i.test(x)) return true;
-            return false;
-          };
-
-          let t = '';
-          for (const sel of ['meta[property="og:title"]', 'meta[name="og:title"]']) {
-            t = pickClean(dom?.querySelector(sel)?.getAttribute('content') || '');
-            if (t) break;
-          }
-          if (!t) t = pickClean(dom?.querySelector('title')?.textContent || '');
-
-          // HTML fallback (order-independent meta parsing)
-          if (isBad(t)) {
-            const s = String(html || '');
-            if (s) {
-              const mTag =
-                /<meta\b[^>]*\b(?:property|name)=["']og:title["'][^>]*>/i.exec(s) ||
-                /<meta\b[^>]*\bcontent=["'][^"']+["'][^>]*\b(?:property|name)=["']og:title["'][^>]*>/i.exec(s);
-              if (mTag && mTag[0]) {
-                const mC = /\bcontent=["']([^"']+)["']/i.exec(mTag[0]);
-                if (mC && mC[1]) t = pickClean(mC[1]);
-              }
-
-              if (isBad(t)) {
-                const mT = /<title[^>]*>\s*([^<]+?)\s*<\/title>/i.exec(s);
-                if (mT && mT[1]) t = pickClean(mT[1]);
-              }
-            }
-          }
-
-          if (isBad(t)) return albumId;
-          return t;
-        } catch (e) {}
-        return albumId;
-      };
-
       const addHint = (slug, name, sizeBytes) => {
         const dUrl = `${origin}/d/${slug}`;
         if (name) {
@@ -92,60 +135,6 @@ resolvers.push([
           filesterSizeByUrl.set(String(dUrl), Number(sizeBytes));
         }
         filesterSlugByUrl.set(String(dUrl), String(slug));
-      };
-
-      const parsePage = (dom, html) => {
-        const out = [];
-        const items = dom ? [...dom.querySelectorAll('div.file-item')] : [];
-        for (const el of items) {
-          let slug = '';
-          const oc = String(el.getAttribute('onclick') || '');
-          const m = /\/d\/([^'"?\s]+)/i.exec(oc);
-          if (m && m[1]) slug = m[1];
-
-          if (!slug) {
-            const btn = el.querySelector('button.download-btn');
-            const oc2 = String(btn?.getAttribute?.('onclick') || '');
-            const m2 = /downloadFile\(\s*'([^']+)'/i.exec(oc2);
-            if (m2 && m2[1]) slug = m2[1];
-          }
-
-          if (!slug) {
-            const a = el.querySelector('a[href*="/d/"]');
-            const href = String(a?.getAttribute?.('href') || '');
-            const m3 = /\/d\/([^\/?#]+)/i.exec(href);
-            if (m3 && m3[1]) slug = m3[1];
-          }
-
-          if (!slug) continue;
-
-          let name = '';
-          let size = 0;
-
-          name = String(el.getAttribute('data-name') || '').trim();
-          if (!name) {
-            name = String(el.querySelector('.file-name')?.textContent || '').trim();
-          }
-
-          size = Number(el.getAttribute('data-size') || 0) || 0;
-
-          out.push({ slug, name, size });
-        }
-
-        // Regex fallback if DOM parsing is incomplete
-        const s = String(html || '');
-        if (s) {
-          const rx = /data-name="([^"]+)"[^>]*\bonclick="window\.location\.href='\/d\/([^']+)'/gi;
-          let m;
-          while ((m = rx.exec(s)) !== null) {
-            const name = String(m[1] || '').trim();
-            const slug = String(m[2] || '').trim();
-            if (!slug) continue;
-            out.push({ slug, name, size: 0 });
-          }
-        }
-
-        return out;
       };
 
       for (let page = 1; page <= MAX_PAGES; page++) {
@@ -179,12 +168,12 @@ resolvers.push([
         }
 
         if (page === 1) {
-          folderName = getFolderName(dom, source);
+          folderName = filesterAlbumFolderName(dom, source, albumId);
         }
 
         const before = seen.size;
 
-        const entries = parsePage(dom, source);
+        const entries = filesterParseAlbumPage(dom, source);
         for (const it of entries) {
           const slug = String(it.slug || '').trim();
           if (!slug || seen.has(slug)) continue;

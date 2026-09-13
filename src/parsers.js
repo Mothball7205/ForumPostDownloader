@@ -112,29 +112,6 @@ const parsers = {
           }
         };
 
-        const __imagebamFullFromThumb = thumbUrl => {
-          if (!thumbUrl) return null;
-          const s = String(thumbUrl).trim();
-          if (!s) return null;
-
-          try {
-            const u = new URL(s, location.origin);
-            const host = (u.hostname || '').toLowerCase();
-            if (!host.endsWith('.imagebam.com')) return null;
-            if (!host.startsWith('thumbs')) return null;
-
-            const newHost = host.replace(/^thumbs/i, 'images');
-            let path = u.pathname || '';
-            // Imagebam thumbnails use _t or -t before the extension.
-            path = path.replace(/_t(\.[a-z0-9]+)$/i, '$1');
-            path = path.replace(/-t(\.[a-z0-9]+)$/i, '$1');
-
-            return `${u.protocol}//${newHost}${path}`;
-          } catch (e) {
-            return null;
-          }
-        };
-
         const sel = ['a[href*="/redirect/"]', 'a[href^="/redirect"]', 'a[href*="redirect?"]', 'a[href*="link-proxy"]'].join(', ');
 
         messageContentClone.querySelectorAll(sel).forEach(a => {

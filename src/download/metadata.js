@@ -29,6 +29,87 @@ const gmDownloadText = url =>
     }
   });
 
+const downloadPixeldrainOrigin = url => {
+  try {
+    const parsed = new URL(url || '', location.origin);
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (host.endsWith('pixeldrain.net')) return 'https://pixeldrain.net';
+    if (host.endsWith('pixeldra.in')) return 'https://pixeldra.in';
+    return 'https://pixeldrain.com';
+  } catch (e) {
+    return 'https://pixeldrain.com';
+  }
+};
+
+const applyPixeldrainMetadata = (meta, text) => {
+  try {
+    const json = JSON.parse(text);
+    const value = json && (json.value || json.data || json);
+    meta.size = extractNum((value && (value.size ?? value.bytes ?? value.length)) ?? (json && (json.size ?? json.bytes)));
+    meta.filename = String((value && (value.name ?? value.filename ?? value.title)) ?? (json && (json.name ?? json.filename)) ?? '');
+  } catch (e) {}
+};
+
+const collectPixeldrainMetadata = async (url, meta) => {
+  const match = /(?:pixeldrain\.com|pixeldrain\.net|pixeldra\.in)\/api\/file\/([^\/?#]+)/i.exec(url || '');
+  if (!match || !match[1]) return;
+  const infoUrl = `${downloadPixeldrainOrigin(url)}/api/file/${match[1]}/info`;
+  const response = await gmDownloadText(infoUrl);
+  if (response.ok && response.text) applyPixeldrainMetadata(meta, response.text);
+};
+
+const filesterMetadataSizeHint = url => {
+  try {
+    // Prefer slug-based hints (from /f/ album page) when available.
+    const slug = String(filesterSlugByUrl.get(String(url)) || '');
+    return Number(filesterSizeBySlug.get(slug) || filesterSizeByUrl.get(String(url)) || 0) || 0;
+  } catch (e) {
+    return 0;
+  }
+};
+
+const filesterMetadataNameHint = url => {
+  try {
+    const slug = String(filesterSlugByUrl.get(String(url)) || '');
+    return String(filesterNameBySlug.get(slug) || filesterNameByUrl.get(String(url)) || '');
+  } catch (e) {
+    return '';
+  }
+};
+
+const collectFilesterMetadata = (url, meta) => {
+  // API hints supply names and sizes that may be absent from CDN URLs.
+  try {
+    if (!meta.size) {
+      const hintedSize = filesterMetadataSizeHint(url);
+      if (hintedSize) meta.size = extractNum(hintedSize);
+    }
+    if (!meta.filename) {
+      const hintedName = filesterMetadataNameHint(url);
+      if (hintedName) meta.filename = hintedName;
+    }
+  } catch (e) {}
+};
+
+const needsDownloadMetadataHead = (url, meta, isGoFile, isPixeldrain) => {
+  const nameHasExt = /\.[A-Za-z0-9]{1,8}$/.test(String(meta.filename || ''));
+  const isFilester = isFilesterUrl(url);
+  return !!(isGoFile || isPixeldrain || (!isFilester && (!meta.size || !meta.filename || !nameHasExt)));
+};
+
+const collectDownloadHeadMetadata = async (url, meta) => {
+  const response = await gmDownloadHead(url);
+  meta.status = response.status || 0;
+  meta.headers = response.headers || '';
+  meta.contentType = headerValue(meta.headers, 'content-type');
+  const contentLength = headerValue(meta.headers, 'content-length');
+  if (!meta.size && contentLength) meta.size = extractNum(contentLength);
+  if (!meta.filename) {
+    const filename = parseDispositionFilename(meta.headers);
+    if (filename) meta.filename = filename;
+  }
+};
+
 const createDownloadMetadataReader = () => {
   const cache = new Map();
 
@@ -39,73 +120,12 @@ const createDownloadMetadataReader = () => {
     const meta = { size: 0, filename: '', status: 0, contentType: '', headers: '' };
 
     try {
-      if (isPixeldrain) {
-        const mFile = /(?:pixeldrain\.com|pixeldrain\.net|pixeldra\.in)\/api\/file\/([^\/?#]+)/i.exec(url || '');
-        if (mFile && mFile[1]) {
-          const pdOrigin = (() => {
-            try {
-              const uu = new URL(url || '', location.origin);
-              const host = String(uu.hostname || '').toLowerCase();
-              if (host.endsWith('pixeldrain.net')) return 'https://pixeldrain.net';
-              if (host.endsWith('pixeldra.in')) return 'https://pixeldra.in';
-              return 'https://pixeldrain.com';
-            } catch (e) {
-              return 'https://pixeldrain.com';
-            }
-          })();
-          const infoUrl = `${pdOrigin}/api/file/${mFile[1]}/info`;
-          const r = await gmDownloadText(infoUrl);
-          if (r.ok && r.text) {
-            try {
-              const j = JSON.parse(r.text);
-              const v = j && (j.value || j.data || j);
-              meta.size = extractNum((v && (v.size ?? v.bytes ?? v.length)) ?? (j && (j.size ?? j.bytes)));
-              meta.filename = String((v && (v.name ?? v.filename ?? v.title)) ?? (j && (j.name ?? j.filename)) ?? '');
-            } catch (e) {}
-          }
-        }
-      }
+      if (isPixeldrain) await collectPixeldrainMetadata(url, meta);
+      collectFilesterMetadata(url, meta);
 
-      // Filester hints (API gives name/size but the CDN URL may not include them)
-      try {
-        if (!meta.size) {
-          let hintedSize = 0;
-          try {
-            // Prefer slug-based hints (from /f/ album page) when available.
-            const s0 = String(filesterSlugByUrl.get(String(url)) || '');
-            hintedSize = Number(filesterSizeBySlug.get(s0) || filesterSizeByUrl.get(String(url)) || 0) || 0;
-          } catch (e) {
-            hintedSize = 0;
-          }
-          if (hintedSize) meta.size = extractNum(hintedSize);
-        }
-        if (!meta.filename) {
-          let hintedName = '';
-          try {
-            const s0 = String(filesterSlugByUrl.get(String(url)) || '');
-            hintedName = String(filesterNameBySlug.get(s0) || filesterNameByUrl.get(String(url)) || '');
-          } catch (e) {
-            hintedName = '';
-          }
-          if (hintedName) meta.filename = hintedName;
-        }
-      } catch (e) {}
-
-      // Fallback HEAD (works for GoFile store links and Pixeldrain list ZIPs)
-      const nameHasExt = /\.[A-Za-z0-9]{1,8}$/.test(String(meta.filename || ''));
-      const isFilester = isFilesterUrl(url);
-      const needHead = !!(isGoFile || isPixeldrain || (!isFilester && (!meta.size || !meta.filename || !nameHasExt)));
-      if (needHead) {
-        const hRes = await gmDownloadHead(url);
-        meta.status = hRes.status || 0;
-        meta.headers = hRes.headers || '';
-        meta.contentType = headerValue(meta.headers, 'content-type');
-        const cl = headerValue(meta.headers, 'content-length');
-        if (!meta.size && cl) meta.size = extractNum(cl);
-        if (!meta.filename) {
-          const cdName = parseDispositionFilename(meta.headers);
-          if (cdName) meta.filename = cdName;
-        }
+      // HEAD remains mandatory for GoFile and Pixeldrain; otherwise skip Filester.
+      if (needsDownloadMetadataHead(url, meta, isGoFile, isPixeldrain)) {
+        await collectDownloadHeadMetadata(url, meta);
       }
     } catch (e) {}
 

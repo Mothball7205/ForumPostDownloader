@@ -229,56 +229,6 @@ async function xfpdBunkrGetWithCfRetry(http, url, warmUrlOrOrigin, allowWarmup =
   return last || { dom: null, source: '' };
 }
 
-async function xfpdBunkrPostVsWithCfRetry(http, endpoint, slug, refererUrl, originUrl, allowWarmup = true) {
-  let lastText = '';
-  let lastStatus = 0;
-  for (let attempt = 0; attempt <= BUNKR_CF_MAX_RETRIES; attempt++) {
-    try {
-      const response = await http.post(
-        endpoint,
-        JSON.stringify({ slug }),
-        {},
-        {
-          'Content-Type': 'application/json',
-          Referer: refererUrl,
-          Origin: originUrl,
-        },
-      );
-      lastText = String(response?.source || '');
-      lastStatus = Number(response?.status || 0);
-    } catch (e) {
-      lastText = '';
-      lastStatus = 0;
-    }
-
-    // Ban blocked non-last domains so the caller can try the next one.
-    if (BUNKR_FASTFAIL_ON_403 && Number(lastStatus || 0) === 403 && !allowWarmup) {
-      xfpdBunkrBanBase(originUrl || refererUrl || endpoint);
-      return null;
-    }
-    if (BUNKR_FASTFAIL_ON_403 && !allowWarmup && xfpdLooksLikeCfChallenge(lastText, null)) {
-      xfpdBunkrBanBase(originUrl || refererUrl || endpoint);
-      return null;
-    }
-    try {
-      return JSON.parse(lastText || '{}');
-    } catch (e) {
-      if (xfpdLooksLikeCfChallenge(lastText, null) && attempt < BUNKR_CF_MAX_RETRIES) {
-        if (allowWarmup) {
-          await xfpdBunkrCfWarmup(String(refererUrl || originUrl || endpoint));
-        } else {
-          try {
-            await h.delayedResolve(200);
-          } catch (e2) {}
-        }
-        continue;
-      }
-      return null;
-    }
-  }
-  return null;
-}
-
 // Sign a bunkr cdn.cr URL via glb-apisign.cdn.cr — required for download (unsigned URLs return 403).
 async function xfpdBunkrSignCdnUrl(http, rawUrl) {
   try {

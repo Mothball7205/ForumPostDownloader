@@ -57,48 +57,33 @@ const classifyFilesterDownload = (url, filenameHint = '') => {
 const isFilesterAlbumOriginal = s =>
   /(?:^|\/\/)(?:www\.)?filester\.(me|sh|si|gg)\/f\//i.test(String(s || '')) || /filester\.(me|sh|si|gg)\/f\//i.test(String(s || ''));
 
-// Unknown sizes (0) cannot qualify an album for ZIP; return indexes requiring DIRECT.
-const planFilesterAlbum = (items, zipped, maxBytes) => {
-  let hasImage = false;
+const summarizeFilesterAlbum = items => {
   let hasNonImage = false;
   let totalSize = 0;
   let unknownSize = 0;
 
   for (const it of items) {
-    const kind = it.kind || 'other';
-    if (kind === 'image') {
-      hasImage = true;
-    } else {
-      hasNonImage = true;
-    }
+    if ((it.kind || 'other') !== 'image') hasNonImage = true;
 
     const sz0 = Number(it.size) || 0;
     if (sz0 > 0) totalSize += sz0;
     else unknownSize++;
   }
 
+  return { hasNonImage, totalSize, unknownSize };
+};
+
+// Unknown sizes (0) cannot qualify an album for ZIP; return indexes requiring DIRECT.
+const planFilesterAlbum = (items, zipped, maxBytes) => {
+  const { hasNonImage, totalSize, unknownSize } = summarizeFilesterAlbum(items);
   const allSizesKnown = unknownSize === 0 && totalSize > 0;
   const canZipAll = allSizesKnown && totalSize <= maxBytes;
 
   const forceDirectIndexes = [];
 
-  if (!zipped) {
-    // Unzipped: if there is ANY non-image (mixed or video-only) -> DIRECT all.
-    if (hasNonImage) {
-      for (let i = 0; i < items.length; i++) forceDirectIndexes.push(i);
-    }
-  } else if (hasImage && hasNonImage) {
-    // Zipped mixed: ZIP images only; everything else DIRECT when we can't ZIP all.
-    if (!canZipAll) {
-      for (let i = 0; i < items.length; i++) {
-        const kind = items[i].kind || 'other';
-        if (kind !== 'image') forceDirectIndexes.push(i);
-      }
-    }
-  } else if (!hasImage && hasNonImage) {
-    // Zipped non-image only: DIRECT all when we can't ZIP all.
-    if (!canZipAll) {
-      for (let i = 0; i < items.length; i++) forceDirectIndexes.push(i);
+  if (hasNonImage && (!zipped || !canZipAll)) {
+    for (let i = 0; i < items.length; i++) {
+      if (!zipped || (items[i].kind || 'other') !== 'image') forceDirectIndexes.push(i);
     }
   }
   // Images-only album: keep default behavior.
@@ -106,37 +91,67 @@ const planFilesterAlbum = (items, zipped, maxBytes) => {
   return { forceDirectIndexes, totalSize, unknownSize };
 };
 
+const groupFilesterAlbumItems = resources => {
+  const groups = new Map();
+  for (const item of resources.filter(r => r && r.url && isFilesterAlbumOriginal(r.original))) {
+    const key = String(item.original || '');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return groups;
+};
+
+const readFilesterAlbumSizes = async (items, readMetadata) => {
+  const sizes = items.map(it => filesterHintSize(it.url));
+  const unknownItems = [];
+  for (let i = 0; i < items.length; i++) {
+    if (!(sizes[i] > 0)) unknownItems.push({ it: items[i], index: i });
+  }
+  // Bound HEAD probes on large albums; unknown sizes retain the safer policy.
+  if (unknownItems.length && unknownItems.length <= 10 && items.length <= 25) {
+    for (const u of unknownItems) {
+      const meta = await readMetadata(u.it.url);
+      const size = Number(meta && meta.size) || 0;
+      if (size > 0) sizes[u.index] = size;
+    }
+  }
+  return sizes;
+};
+
+const describeFilesterAlbumPolicy = (zipped, imgCount, vidCount, otherCount, canZipAll) => {
+  if (!(vidCount || otherCount)) return '';
+  if (!zipped) return 'Filester album (unzipped) has non-image -> DIRECT all';
+  if (imgCount) {
+    return canZipAll ? 'Filester mixed album total<=~1.6GB -> ZIP all' : 'Filester mixed album -> ZIP images, DIRECT others';
+  }
+  const kind = vidCount > 0 && otherCount === 0 ? 'video-only' : 'non-image';
+  return canZipAll ? `Filester ${kind} album total<=~1.6GB -> ZIP all` : `Filester ${kind} album >~1.6GB or unknown -> DIRECT all`;
+};
+
+const logFilesterAlbumPolicy = (albumUrl, kinds, decision, zipped, postId, postNumber) => {
+  let imgCount = 0;
+  let vidCount = 0;
+  let otherCount = 0;
+  for (const kind of kinds) {
+    if (kind === 'image') imgCount++;
+    else if (kind === 'video') vidCount++;
+    else otherCount++;
+  }
+  const allSizesKnown = decision.unknownSize === 0 && decision.totalSize > 0;
+  const canZipAll = allSizesKnown && decision.totalSize <= DOWNLOAD_BLOB_MAX_BYTES;
+  const totalStr = allSizesKnown ? `${Math.round(decision.totalSize / 1024 / 1024)}MB` : 'unknown';
+  const info = `files=${kinds.length}, images=${imgCount}, videos=${vidCount}, other=${otherCount}, total=${totalStr}, unknown=${decision.unknownSize}`;
+  const message = describeFilesterAlbumPolicy(zipped, imgCount, vidCount, otherCount, canZipAll);
+  if (message) log.post.info(postId, `::${message} (${info})::: ${albumUrl}`, postNumber);
+};
+
 // Decide once per post, grouped by original album URL, before transfer batching.
 const applyFilesterAlbumPolicy = async (resources, { zipped, readMetadata, postId, postNumber }) => {
   try {
-    const albumItems = resources.filter(r => r && r.url && isFilesterAlbumOriginal(r.original));
-    if (!albumItems.length) return;
-
-    // Group by the original album URL so each album is handled independently.
-    const groups = new Map();
-    for (const it of albumItems) {
-      const k = String(it.original || '');
-      if (!groups.has(k)) groups.set(k, []);
-      groups.get(k).push(it);
-    }
-
+    const groups = groupFilesterAlbumItems(resources);
     for (const [albumUrl, items] of groups.entries()) {
       const kinds = items.map(it => classifyFilesterDownload(it.url));
-      const sizes = items.map(it => filesterHintSize(it.url));
-
-      const unknownItems = [];
-      for (let i = 0; i < items.length; i++) {
-        if (!(sizes[i] > 0)) unknownItems.push({ it: items[i], index: i });
-      }
-
-      // Bound HEAD probes on large albums; unknown sizes retain the safer policy.
-      if (unknownItems.length && unknownItems.length <= 10 && items.length <= 25) {
-        for (const u of unknownItems) {
-          const meta = await readMetadata(u.it.url);
-          const sz = Number(meta && meta.size) || 0;
-          if (sz > 0) sizes[u.index] = sz;
-        }
-      }
+      const sizes = await readFilesterAlbumSizes(items, readMetadata);
 
       const dec = planFilesterAlbum(
         items.map((it, i) => ({ index: i, kind: kinds[i], size: sizes[i] })),
@@ -146,58 +161,7 @@ const applyFilesterAlbumPolicy = async (resources, { zipped, readMetadata, postI
 
       for (const idx of dec.forceDirectIndexes) items[idx].forceDirect = true;
 
-      let hasImage = false;
-      let hasNonImage = false;
-      let imgCount = 0;
-      let vidCount = 0;
-      let otherCount = 0;
-      for (const k of kinds) {
-        if (k === 'image') {
-          hasImage = true;
-          imgCount++;
-        } else if (k === 'video') {
-          hasNonImage = true;
-          vidCount++;
-        } else {
-          hasNonImage = true;
-          otherCount++;
-        }
-      }
-
-      const allSizesKnown = dec.unknownSize === 0 && dec.totalSize > 0;
-      const canZipAll = allSizesKnown && dec.totalSize <= DOWNLOAD_BLOB_MAX_BYTES;
-      const totalStr = allSizesKnown ? `${Math.round(dec.totalSize / 1024 / 1024)}MB` : 'unknown';
-      const info = `files=${items.length}, images=${imgCount}, videos=${vidCount}, other=${otherCount}, total=${totalStr}, unknown=${dec.unknownSize}`;
-
-      if (!zipped) {
-        if (hasNonImage) {
-          log.post.info(postId, `::Filester album (unzipped) has non-image -> DIRECT all (${info})::: ${albumUrl}`, postNumber);
-        }
-        continue;
-      }
-
-      if (hasImage && hasNonImage) {
-        if (!canZipAll) {
-          log.post.info(postId, `::Filester mixed album -> ZIP images, DIRECT others (${info})::: ${albumUrl}`, postNumber);
-        } else {
-          log.post.info(postId, `::Filester mixed album total<=~1.6GB -> ZIP all (${info})::: ${albumUrl}`, postNumber);
-        }
-      } else if (!hasImage && hasNonImage) {
-        const isVideoOnly = vidCount > 0 && otherCount === 0;
-        if (!canZipAll) {
-          log.post.info(
-            postId,
-            `::Filester ${isVideoOnly ? 'video-only' : 'non-image'} album >~1.6GB or unknown -> DIRECT all (${info})::: ${albumUrl}`,
-            postNumber,
-          );
-        } else {
-          log.post.info(
-            postId,
-            `::Filester ${isVideoOnly ? 'video-only' : 'non-image'} album total<=~1.6GB -> ZIP all (${info})::: ${albumUrl}`,
-            postNumber,
-          );
-        }
-      }
+      logFilesterAlbumPolicy(albumUrl, kinds, dec, zipped, postId, postNumber);
     }
   } catch (e) {}
 };
@@ -222,6 +186,47 @@ const prepareFilesterDownloadResource = async (resource, { postId, postNumber, t
   return stream.url;
 };
 
+const probeFilesterDirectCandidate = async (candidate, ref, remaining) => {
+  try {
+    return await h.http.get(
+      candidate,
+      { onResponseHeadersReceieved: () => {} },
+      { Range: 'bytes=0-0', Accept: '*/*', Referer: ref, __xfpd_withCredentials: true },
+      'text',
+      Math.min(FILESTER_PROBE_TIMEOUT_MS, remaining),
+    );
+  } catch (e) {
+    return null;
+  }
+};
+
+const filesterDirectProbeSucceeded = (response, status) => {
+  const headers = String(response?.responseHeaders || '');
+  const isGate = /(?:^|\r?\n)content-type:\s*(?:text\/html|application\/xhtml\+xml|application\/json)/i.test(headers);
+  return status >= 200 && status < 400 && !isGate;
+};
+
+const acceptFilesterDirectCandidate = (response, status, candidate, originalUrl, ref, postId, postNumber) => {
+  const finalUrl = String(response.finalUrl || '');
+  const directUrl = /^https?:\/\//i.test(finalUrl) ? finalUrl : candidate;
+  const slug = filesterSlugByUrl.get(originalUrl);
+  if (filesterV2Urls.has(originalUrl)) filesterV2Urls.add(directUrl);
+  if (slug) filesterSlugByUrl.set(directUrl, slug);
+  filesterRefByUrl.set(directUrl, ref);
+  if (directUrl !== originalUrl) {
+    log.post.info(postId, `::Filester DIRECT selected stream (HTTP ${status})::: ${directUrl}`, postNumber);
+  }
+  return { directUrl, preflightDone: true };
+};
+
+const waitForFilesterDirectRetry = async (candidate, index, deadline, status, postId, postNumber) => {
+  const delay = Math.min(650 * (index + 1), deadline - Date.now());
+  if (delay <= 0) return false;
+  log.post.info(postId, `::Filester DIRECT HTTP ${status} -> trying another legacy CDN::: ${candidate}`, postNumber);
+  await h.delayedResolve(delay);
+  return true;
+};
+
 // V2 tokens are server-bound: only preflight the issued URL. Legacy /v/ streams
 // may rotate hosts, within both a per-request deadline and a total probe budget.
 const selectFilesterDirectUrl = async (url, resource, { postId, postNumber }) => {
@@ -233,46 +238,26 @@ const selectFilesterDirectUrl = async (url, resource, { postId, postNumber }) =>
   const candidates = token
     ? [...new Set([originalUrl, ...(filesterCandidatesByToken.get(token) || filesterBuildCandidates(token))])]
     : [originalUrl];
+  return probeFilesterDirectCandidates(candidates, originalUrl, ref, postId, postNumber);
+};
+
+const probeFilesterDirectCandidates = async (candidates, originalUrl, ref, postId, postNumber) => {
   const deadline = Date.now() + FILESTER_PROBE_BUDGET_MS;
 
   for (let i = 0; i < Math.min(3, candidates.length); i++) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     const candidate = candidates[i];
-    let response = null;
-    try {
-      response = await h.http.get(
-        candidate,
-        { onResponseHeadersReceieved: () => {} },
-        { Range: 'bytes=0-0', Accept: '*/*', Referer: ref, __xfpd_withCredentials: true },
-        'text',
-        Math.min(FILESTER_PROBE_TIMEOUT_MS, remaining),
-      );
-    } catch (e) {}
-
+    const response = await probeFilesterDirectCandidate(candidate, ref, remaining);
     const status = Number(response?.status) || 0;
-    const headers = String(response?.responseHeaders || '');
-    const isGate = /(?:^|\r?\n)content-type:\s*(?:text\/html|application\/xhtml\+xml|application\/json)/i.test(headers);
-    if (status >= 200 && status < 400 && !isGate) {
-      const finalUrl = String(response.finalUrl || '');
-      const directUrl = /^https?:\/\//i.test(finalUrl) ? finalUrl : candidate;
-      const slug = filesterSlugByUrl.get(originalUrl);
-      if (filesterV2Urls.has(originalUrl)) filesterV2Urls.add(directUrl);
-      if (slug) filesterSlugByUrl.set(directUrl, slug);
-      filesterRefByUrl.set(directUrl, ref);
-      if (directUrl !== originalUrl) {
-        log.post.info(postId, `::Filester DIRECT selected stream (HTTP ${status})::: ${directUrl}`, postNumber);
-      }
-      return { directUrl, preflightDone: true };
+    if (filesterDirectProbeSucceeded(response, status)) {
+      return acceptFilesterDirectCandidate(response, status, candidate, originalUrl, ref, postId, postNumber);
     }
 
     const retryable = status === 0 || [400, 403, 404, 429].includes(status) || status >= 500;
     if (!retryable) break;
     if (i + 1 < Math.min(3, candidates.length)) {
-      const delay = Math.min(650 * (i + 1), deadline - Date.now());
-      if (delay <= 0) break;
-      log.post.info(postId, `::Filester DIRECT HTTP ${status} -> trying another legacy CDN::: ${candidates[i + 1]}`, postNumber);
-      await h.delayedResolve(delay);
+      if (!(await waitForFilesterDirectRetry(candidates[i + 1], i, deadline, status, postId, postNumber))) break;
     }
   }
 

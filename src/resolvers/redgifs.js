@@ -1,3 +1,73 @@
+const redgifsFetchTempToken = async http => {
+  try {
+    const { source, status } = await http.get('https://api.redgifs.com/v2/auth/temporary', {}, {}, 'text');
+    if (status === 200 && source && h.contains('token', source)) {
+      const token = JSON.parse(source).token;
+      if (token) {
+        GM_setValue('redgifs_token', token);
+      }
+      return token || null;
+    }
+  } catch (e) {}
+  return null;
+};
+
+const redgifsPreferredMediaKeys = ['hd', 'hd1080', 'hd720', 'sd', 'mp4'];
+
+const redgifsSelectMediaUrl = (urls, requireHttpFallback) => {
+  if (!urls) return null;
+  for (const key of redgifsPreferredMediaKeys) {
+    const value = urls[key];
+    if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
+  }
+  for (const value of Object.values(urls)) {
+    if (typeof value !== 'string') continue;
+    if (requireHttpFallback && !/^https?:\/\//i.test(value)) continue;
+    if (/\.mp4(\?|$)/i.test(value)) return value;
+  }
+  return null;
+};
+
+const redgifsProfilePageGifs = page => {
+  if (Array.isArray(page?.gifs)) return page.gifs;
+  return Array.isArray(page?.results) ? page.results : [];
+};
+
+const redgifsAppendProfileMedia = (gifs, resolved) => {
+  for (const gif of gifs) {
+    const best = redgifsSelectMediaUrl(gif?.urls || gif?.gif?.urls, true);
+    if (best) resolved.push(best);
+  }
+};
+
+const redgifsResolveProfilePages = async (fetchPage, baseUrl, progressCB) => {
+  const resolved = [];
+  const MAX_PAGES = 5000;
+  let pages = 1;
+  for (let page = 1; page <= pages && page <= MAX_PAGES; page++) {
+    if (typeof progressCB === 'function') {
+      progressCB(`Resolving: ${baseUrl} (page ${page}/${pages})`);
+    }
+
+    const { source, status } = await fetchPage(page);
+    if (status !== 200 || !source) break;
+
+    let result;
+    try {
+      result = JSON.parse(source);
+    } catch (e) {
+      break;
+    }
+
+    const gifs = redgifsProfilePageGifs(result);
+    pages = Number(result?.pages) || pages;
+    redgifsAppendProfileMedia(gifs, resolved);
+    if (!gifs.length) break;
+    await new Promise(r => setTimeout(r, 75));
+  }
+  return resolved;
+};
+
 resolvers.push([
   [/redgifs\.com\/users\//i],
   async (url, http, passwords, postId, postSettings, progressCB) => {
@@ -11,32 +81,14 @@ resolvers.push([
 
     const baseUrl = `https://www.redgifs.com/users/${username}`;
 
-    const fetchTempToken = async () => {
-      try {
-        const { source, status } = await http.get('https://api.redgifs.com/v2/auth/temporary', {}, {}, 'text');
-        if (status === 200 && source && h.contains('token', source)) {
-          const token = JSON.parse(source).token;
-          if (token) {
-            GM_setValue('redgifs_token', token);
-          }
-          return token || null;
-        }
-      } catch (e) {}
-      return null;
-    };
-
     let token = GM_getValue('redgifs_token', null);
     if (!token) {
-      token = await fetchTempToken();
+      token = await redgifsFetchTempToken(http);
     }
     if (!token) {
       return null;
     }
 
-    const preferredKeys = ['hd', 'hd1080', 'hd720', 'sd', 'mp4'];
-    const resolved = [];
-
-    const MAX_PAGES = 5000;
     const COUNT = 80;
     const ORDER = 'new';
 
@@ -64,7 +116,7 @@ resolvers.push([
         }
 
         if (last.status === 401 || last.status === 403 || (last.source && /unauthorized|forbidden/i.test(last.source))) {
-          token = await fetchTempToken();
+          token = await redgifsFetchTempToken(http);
           if (!token) {
             return last;
           }
@@ -77,65 +129,7 @@ resolvers.push([
       return last;
     };
 
-    let pages = 1;
-
-    for (let page = 1; page <= pages && page <= MAX_PAGES; page++) {
-      if (typeof progressCB === 'function') {
-        progressCB(`Resolving: ${baseUrl} (page ${page}/${pages})`);
-      }
-
-      const { source, status } = await tryFetchPage(page);
-
-      if (status !== 200 || !source) {
-        break;
-      }
-
-      let j;
-      try {
-        j = JSON.parse(source);
-      } catch (e) {
-        break;
-      }
-
-      const gifs = Array.isArray(j?.gifs) ? j.gifs : Array.isArray(j?.results) ? j.results : [];
-      pages = Number(j?.pages) || pages;
-
-      for (const g of gifs) {
-        const urls = g?.urls || g?.gif?.urls;
-        if (!urls) {
-          continue;
-        }
-
-        let best = null;
-
-        for (const k of preferredKeys) {
-          const v = urls[k];
-          if (typeof v === 'string' && /^https?:\/\//i.test(v)) {
-            best = v;
-            break;
-          }
-        }
-
-        if (!best) {
-          for (const v of Object.values(urls)) {
-            if (typeof v === 'string' && /^https?:\/\//i.test(v) && /\.mp4(\?|$)/i.test(v)) {
-              best = v;
-              break;
-            }
-          }
-        }
-
-        if (best) {
-          resolved.push(best);
-        }
-      }
-
-      if (!gifs.length) {
-        break;
-      }
-
-      await new Promise(r => setTimeout(r, 75));
-    }
+    const resolved = await redgifsResolveProfilePages(tryFetchPage, baseUrl, progressCB);
 
     if (!resolved.length) {
       return null;
@@ -161,23 +155,9 @@ resolvers.push([
       return null;
     }
 
-    const fetchTempToken = async () => {
-      try {
-        const { source, status } = await http.get('https://api.redgifs.com/v2/auth/temporary', {}, {}, 'text');
-        if (status === 200 && source && h.contains('token', source)) {
-          const token = JSON.parse(source).token;
-          if (token) {
-            GM_setValue('redgifs_token', token);
-          }
-          return token || null;
-        }
-      } catch (e) {}
-      return null;
-    };
-
     let token = GM_getValue('redgifs_token', null);
     if (!token) {
-      token = await fetchTempToken();
+      token = await redgifsFetchTempToken(http);
     }
     if (!token) {
       return null;
@@ -196,7 +176,7 @@ resolvers.push([
     let { source, status } = await fetchGif(token);
 
     if (status === 401 || status === 403 || (source && /unauthorized|forbidden/i.test(source))) {
-      token = await fetchTempToken();
+      token = await redgifsFetchTempToken(http);
       if (!token) {
         return null;
       }
@@ -214,25 +194,6 @@ resolvers.push([
       return null;
     }
 
-    const urls = j?.gif?.urls || j?.urls;
-    if (!urls) {
-      return null;
-    }
-
-    const preferredKeys = ['hd', 'hd1080', 'hd720', 'sd', 'mp4'];
-    for (const k of preferredKeys) {
-      const v = urls[k];
-      if (typeof v === 'string' && /^https?:\/\//i.test(v)) {
-        return v;
-      }
-    }
-
-    for (const v of Object.values(urls)) {
-      if (typeof v === 'string' && /\.mp4(\?|$)/i.test(v)) {
-        return v;
-      }
-    }
-
-    return null;
+    return redgifsSelectMediaUrl(j?.gif?.urls || j?.urls, false);
   },
 ]);

@@ -23,11 +23,7 @@ const h = {
   contains: (needle, haystack, ignoreCase = true) =>
     (ignoreCase ? haystack.toLowerCase().indexOf(needle.toLowerCase()) : haystack.indexOf(needle)) > -1,
   ucFirst: str => (!str ? str : `${str[0].toUpperCase()}${str.substring(1)}`),
-  unique: (items, cb) => {
-    if (cb) {
-      return items.reduce((acc, item) => (!acc.find(i => i[byKey] === item[byKey]) ? acc.concat(item) : acc), []);
-    }
-
+  unique: items => {
     return items.reduce((acc, item) => (acc.indexOf(item) < 0 ? acc.concat(item) : acc), []);
   },
   // Adapted from https://github.com/sindresorhus/pretty-bytes.

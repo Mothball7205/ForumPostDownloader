@@ -199,7 +199,7 @@ resolvers.push([
 
         return { urls: [], parsed };
       } catch (e) {
-        return { urls: [], parsed };
+        return null;
       }
     };
 
@@ -209,6 +209,7 @@ resolvers.push([
 
     for (let i = 1; i <= pageCount; i++) {
       const data = await fetchPageData(albumId, i, seekEnd, authToken);
+      if (!data?.parsed) return null;
       seekEnd = data.parsed.seekEnd;
       resolved.push(...data.urls);
     }

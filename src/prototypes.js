@@ -1,3 +1,3 @@
-Array.prototype.unique = function (cb) {
-  return h.unique(this, cb);
+Array.prototype.unique = function () {
+  return h.unique(this);
 };

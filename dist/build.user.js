@@ -801,11 +801,7 @@ const h = {
   contains: (needle, haystack, ignoreCase = true) =>
     (ignoreCase ? haystack.toLowerCase().indexOf(needle.toLowerCase()) : haystack.indexOf(needle)) > -1,
   ucFirst: str => (!str ? str : `${str[0].toUpperCase()}${str.substring(1)}`),
-  unique: (items, cb) => {
-    if (cb) {
-      return items.reduce((acc, item) => (!acc.find(i => i[byKey] === item[byKey]) ? acc.concat(item) : acc), []);
-    }
-
+  unique: items => {
     return items.reduce((acc, item) => (acc.indexOf(item) < 0 ? acc.concat(item) : acc), []);
   },
   // Adapted from https://github.com/sindresorhus/pretty-bytes.
@@ -1294,8 +1290,8 @@ function goonboxBridgeServe() {
 
 window.addEventListener('pagehide', () => goonboxBridgeClose(goonboxBridgeSession));
 
-Array.prototype.unique = function (cb) {
-  return h.unique(this, cb);
+Array.prototype.unique = function () {
+  return h.unique(this);
 };
 
 const parsers = {
@@ -2533,7 +2529,7 @@ resolvers.push([
 
         return { urls: [], parsed };
       } catch (e) {
-        return { urls: [], parsed };
+        return null;
       }
     };
 
@@ -2543,6 +2539,7 @@ resolvers.push([
 
     for (let i = 1; i <= pageCount; i++) {
       const data = await fetchPageData(albumId, i, seekEnd, authToken);
+      if (!data?.parsed) return null;
       seekEnd = data.parsed.seekEnd;
       resolved.push(...data.urls);
     }
@@ -4666,15 +4663,16 @@ resolvers.push([
   [/imgbox.com\/g\//],
   async (url, http) => {
     const { source, dom } = await http.get(url);
+    if (!dom) return null;
 
-    const resolved = [...dom?.querySelectorAll('#gallery-view-content > a > img')]
+    const resolved = [...dom.querySelectorAll('#gallery-view-content > a > img')]
       .map(img => img.getAttribute('src'))
       .map(url => url.replace(/(thumbs|t)(\d+)\./gis, 'images$2.').replace('_b.', '_o.'));
 
     return {
       dom,
       source,
-      folderName: dom?.querySelector('#gallery-view > h1').innerText.trim(),
+      folderName: dom.querySelector('#gallery-view > h1')?.innerText.trim() || h.basename(url),
       resolved,
     };
   },

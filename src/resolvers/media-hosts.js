@@ -128,15 +128,16 @@ resolvers.push([
   [/imgbox.com\/g\//],
   async (url, http) => {
     const { source, dom } = await http.get(url);
+    if (!dom) return null;
 
-    const resolved = [...dom?.querySelectorAll('#gallery-view-content > a > img')]
+    const resolved = [...dom.querySelectorAll('#gallery-view-content > a > img')]
       .map(img => img.getAttribute('src'))
       .map(url => url.replace(/(thumbs|t)(\d+)\./gis, 'images$2.').replace('_b.', '_o.'));
 
     return {
       dom,
       source,
-      folderName: dom?.querySelector('#gallery-view > h1').innerText.trim(),
+      folderName: dom.querySelector('#gallery-view > h1')?.innerText.trim() || h.basename(url),
       resolved,
     };
   },

@@ -30,6 +30,7 @@ const FILES = [
   'resolvers/misc.js',
   'download-utils.js',
   'download/lifecycle.js',
+  'download/queue.js',
   'download/resolution.js',
   'download/metadata.js',
   'download/naming.js',

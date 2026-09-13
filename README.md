@@ -13,6 +13,12 @@ This Tampermonkey script allows for downloading individual posts and pages from 
 # Updates
 The script should automatically update from GitHub. If it doesn't simply repeat the steps 3-6 from the installation section (paste into the existing script instead of creating a new one (step #4)).
 
+## Download pipeline
+
+Bunkr downloads start as file URLs become ready, while the remaining album files are still resolving. Resolution keeps its eight-file limit, an eight-item ready queue applies backpressure, and Bunkr transfers use one download slot. The status shows resolution progress alongside finished and active downloads.
+
+ZIP files are saved only after resolution and all transfers finish. Posts with duplicate filtering enabled, links-only mode, or a Filester album keep the resolve-first workflow so post-wide decisions remain unchanged.
+
 ## Development
 
 - `bun run format` formats source and tests, then rebuilds the userscript.

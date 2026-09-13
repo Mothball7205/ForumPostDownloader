@@ -150,7 +150,7 @@ resolvers.push([
 
 resolvers.push([
   [/bunkrr?r?\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|su|org)\/a\//],
-  async (url, http, _, __, ___, progressCB) => {
+  async (url, http, _, __, ___, progressCB, onResolved) => {
     const cleanUrl = String(url || '').split('#')[0];
     const baseUrl = cleanUrl.split('?')[0].replace(/\/+$/, '');
 
@@ -206,24 +206,26 @@ resolvers.push([
       return slugs;
     };
 
-    const asyncPool = async (limit, items, worker) => {
-      const results = new Array(items.length);
-      let i = 0;
+    const resolveInOrder = async (limit, items, worker, accept) => {
+      const pending = [];
+      const start = index =>
+        Promise.resolve()
+          .then(() => worker(items[index]))
+          .catch(() => null);
+      for (let index = 0; index < Math.min(limit, items.length); index++) pending.push(start(index));
 
-      const runners = Array.from({ length: Math.max(1, limit) }, async () => {
-        while (true) {
-          const idx = i++;
-          if (idx >= items.length) break;
-          try {
-            results[idx] = await worker(items[idx], idx);
-          } catch (e) {
-            results[idx] = null;
-          }
+      try {
+        for (let index = 0; index < items.length; index++) {
+          const slot = index % limit;
+          const result = await pending[slot];
+          if (result) await accept(result);
+          // Refill only after acceptance so a blocked consumer bounds the lookahead.
+          if (index + limit < items.length) pending[slot] = start(index + limit);
         }
-      });
-
-      await Promise.all(runners);
-      return results;
+      } finally {
+        // A consumer failure stops scheduling, but cannot leave host requests running.
+        await Promise.all(pending);
+      }
     };
 
     const origin = (() => {
@@ -349,7 +351,7 @@ resolvers.push([
         firstDom = dom;
         firstSource = source;
 
-        folderName = getAlbumFolderName(dom);
+        folderName = getAlbumFolderName(dom) || h.basename(baseUrl);
       }
 
       const fresh = collectFreshSlugs(slugs);
@@ -358,16 +360,22 @@ resolvers.push([
 
       let completed = 0;
       if (typeof progressCB === 'function') progressCB(`Resolving Bunkr page ${page}: 0 / ${fresh.length} files`);
-      const urls = await asyncPool(CONCURRENCY, fresh, async slug => {
-        try {
-          return await resolveAlbumSlug(slug);
-        } finally {
-          completed++;
-          if (typeof progressCB === 'function') progressCB(`Resolving Bunkr page ${page}: ${completed} / ${fresh.length} files`);
-        }
-      });
-
-      for (const u of urls) if (u) resolved.push(u);
+      await resolveInOrder(
+        CONCURRENCY,
+        fresh,
+        async slug => {
+          try {
+            return await resolveAlbumSlug(slug);
+          } finally {
+            completed++;
+            if (typeof progressCB === 'function') progressCB(`Resolving Bunkr page ${page}: ${completed} / ${fresh.length} files`);
+          }
+        },
+        async url => {
+          if (typeof onResolved === 'function') await onResolved({ url, folderName });
+          else resolved.push(url);
+        },
+      );
     }
 
     if (!folderName) folderName = h.basename(baseUrl);

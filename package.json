@@ -1,6 +1,6 @@
 {
   "name": "forum-post-downloader",
-  "version": "4.2.1",
+  "version": "4.3.0",
   "description": "Downloads images and videos from all the popular hosts.",
   "scripts": {
     "build": "bun build.js",
